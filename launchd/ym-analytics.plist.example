@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.example.ym-analytics</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/ПУТЬ/К/yandex-market-agent/run_agent.sh</string>
+    </array>
+
+    <!-- Запуск утром (07:30 МСК) и вечером (20:00 МСК) — часть данных
+         по показам/комиссиям догружается у Яндекса в течение дня.
+         07:30 вместо 06:00 — к этому времени Мак обычно уже разбужен и на
+         зарядке, меньше шанс попасть в ночной Power Nap на батарее. -->
+    <key>StartCalendarInterval</key>
+    <array>
+        <dict>
+            <key>Hour</key>
+            <integer>7</integer>
+            <key>Minute</key>
+            <integer>30</integer>
+        </dict>
+        <dict>
+            <key>Hour</key>
+            <integer>20</integer>
+            <key>Minute</key>
+            <integer>0</integer>
+        </dict>
+    </array>
+
+    <key>StandardOutPath</key>
+    <string>/ПУТЬ/К/yandex-market-agent/launchd.log</string>
+    <key>StandardErrorPath</key>
+    <string>/ПУТЬ/К/yandex-market-agent/launchd.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/usr/local/bin:/usr/bin:/bin:/opt/homebrew/bin</string>
+    </dict>
+</dict>
+</plist>
