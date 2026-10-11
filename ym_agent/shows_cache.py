@@ -11,13 +11,14 @@
 Так живые данные всегда главнее, но нулевая дыра не затирает ранее полученное.
 """
 
+from .config import DATA_DIR
 import json
 import os
 from datetime import date, timedelta
 
 import pandas as pd
 
-_CACHE_FILE = os.path.join(os.path.dirname(__file__), "shows_cache.json")
+_CACHE_FILE = os.path.join(DATA_DIR, "shows_cache.json")
 
 # Метрики, которые храним и восстанавливаем (берём те, что есть в df).
 _METRIC_COLS = [

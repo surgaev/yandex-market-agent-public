@@ -28,7 +28,7 @@ import requests
 import openpyxl
 import pandas as pd
 from datetime import date, datetime, timedelta
-from config import OAUTH_TOKEN, BUSINESS_ID, YM_API_BASE
+from .config import OAUTH_TOKEN, BUSINESS_ID, YM_API_BASE
 
 
 def _headers():

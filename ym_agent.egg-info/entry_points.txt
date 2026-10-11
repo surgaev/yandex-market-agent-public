@@ -1,0 +1,2 @@
+[console_scripts]
+ym-agent = ym_agent.cli:main

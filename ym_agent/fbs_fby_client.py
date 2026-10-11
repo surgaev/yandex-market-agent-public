@@ -14,8 +14,8 @@ Stock types:
 import time
 from datetime import date, timedelta
 from collections import defaultdict
-from config import OAUTH_TOKEN, BUSINESS_ID, YM_API_BASE, CAMPAIGN_ID, FBY_CAMPAIGN_ID
-from yandex_client import _request_raw_with_retry
+from .config import OAUTH_TOKEN, BUSINESS_ID, YM_API_BASE, CAMPAIGN_ID, FBY_CAMPAIGN_ID
+from .yandex_client import _request_raw_with_retry
 
 FBS_CAMPAIGN = CAMPAIGN_ID
 FBY_CAMPAIGN = FBY_CAMPAIGN_ID

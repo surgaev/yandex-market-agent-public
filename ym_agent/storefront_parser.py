@@ -13,8 +13,8 @@ Offer statuses:
 """
 
 import time
-from config import OAUTH_TOKEN, CAMPAIGN_ID, YM_API_BASE
-from yandex_client import _request_raw_with_retry
+from .config import OAUTH_TOKEN, CAMPAIGN_ID, YM_API_BASE
+from .yandex_client import _request_raw_with_retry
 
 
 def get_storefront_skus() -> set[str]:

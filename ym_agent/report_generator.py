@@ -1488,7 +1488,7 @@ def build_report(
 
     # Лист «Текущий тест» — тест vs контроль по БУСТ-показам (рядом с «Показы 14д»)
     try:
-        from config import (BOOST_TEST_LABEL, BOOST_TEST_START,
+        from .config import (BOOST_TEST_LABEL, BOOST_TEST_START,
                             BOOST_TEST_SKUS, BOOST_CONTROL_SKUS)
     except Exception:
         BOOST_TEST_LABEL = BOOST_TEST_START = ""
@@ -1805,8 +1805,8 @@ def build_report(
     boost_detail_ue = kwargs.get("boost_detail", {}) or {}
     netting_ue = kwargs.get("netting", {}) or {}
     if all_fee_orders:
-        from cost_prices import get_cost_price, TAX_RATE
-        from fbs_fby_client import DELIVERED_STATUSES, RETURN_STATUSES
+        from .cost_prices import get_cost_price, TAX_RATE
+        from .fbs_fby_client import DELIVERED_STATUSES, RETURN_STATUSES
         from collections import defaultdict
 
         ws10 = wb.create_sheet("Юнит-экономика")
@@ -2424,7 +2424,7 @@ def build_report(
     # SHEET 11: ЛОГИСТИКА ПО РЕГИОНАМ
     # ══════════════════════════════════════════════════════════════════════════
     if all_fee_orders:
-        from fbs_fby_client import DELIVERED_STATUSES
+        from .fbs_fby_client import DELIVERED_STATUSES
         from collections import defaultdict
 
         ws11 = wb.create_sheet("Логистика по регионам")
@@ -2972,7 +2972,7 @@ def build_report(
     # ══════════════════════════════════════════════════════════════════════════
     # Импорт явный: раньше имя приезжало из секции «Юнит-экономика», а она под
     # `if all_fee_orders:` — без заказов вся сверка падала на NameError.
-    from cost_prices import get_cost_price
+    from .cost_prices import get_cost_price
     netting = kwargs.get("netting", {}) or {}
     netting_from = kwargs.get("netting_from")
     netting_to = kwargs.get("netting_to")
@@ -3577,7 +3577,7 @@ def build_report(
     # ══════════════════════════════════════════════════════════════════════════
     netting_months = kwargs.get("netting_months", {}) or {}
     if netting_months:
-        from cost_prices import get_cost_price as _gcp_m
+        from .cost_prices import get_cost_price as _gcp_m
 
         month_keys = sorted(netting_months)  # "YYYY-MM" сортируется лексикографически = хронологически
         # агрегат по (SKU, месяц), сумма моделей FBS+FBY

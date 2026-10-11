@@ -7,7 +7,11 @@ CAMPAIGN_ID = os.environ.get("YM_CAMPAIGN_ID", "")       # FBS-кампания
 FBY_CAMPAIGN_ID = os.environ.get("YM_FBY_CAMPAIGN_ID", "")  # FBY-кампания
 
 # --- Report output ---
-REPORT_FOLDER = os.environ.get("YM_REPORT_FOLDER", "reports")
+# Настройки (.env), себестоимости (cost_prices.csv) и кэши — в отдельной папке,
+# а не рядом с кодом: пакет ставится через pip/uv и его папка может быть только для чтения.
+DATA_DIR = os.environ.get("YM_AGENT_HOME", os.path.expanduser("~/.ym-agent"))
+os.makedirs(DATA_DIR, exist_ok=True)
+REPORT_FOLDER = os.environ.get("YM_REPORT_FOLDER", os.path.expanduser("~/Downloads"))
 
 # --- Alert thresholds ---
 # Shows are considered "low" when yesterday < (THRESHOLD_RATIO * rolling_avg_7d).

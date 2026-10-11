@@ -11,6 +11,7 @@ Usage:
     YM_OAUTH_TOKEN=<token> YM_REPORT_FOLDER=/path python main.py [--date YYYY-MM-DD]
 """
 
+from .config import DATA_DIR
 import argparse
 import statistics
 import sys
@@ -33,22 +34,22 @@ def _enable_timestamps():
             orig(**kw)
     builtins.print = tprint
 
-from config import REPORT_FOLDER, THRESHOLD_RATIO, EXCLUDED_SKUS
-from yandex_client import (get_all_offers, fetch_shows_sales, fetch_placement_fee_detail,
+from .config import REPORT_FOLDER, THRESHOLD_RATIO, EXCLUDED_SKUS
+from .yandex_client import (get_all_offers, fetch_shows_sales, fetch_placement_fee_detail,
                            get_current_bids, fetch_netting)
-from storefront_parser import get_storefront_skus
-from fbs_fby_client import (get_orders_by_type, get_stocks, estimate_fby_restock,
+from .storefront_parser import get_storefront_skus
+from .fbs_fby_client import (get_orders_by_type, get_stocks, estimate_fby_restock,
                             get_orders_with_fees, get_catalog_prices, get_promo_prices,
                             PromoFetchPartial, get_price_recommendations, get_reviews_summary)
-from report_generator import build_report
-from shows_cache import merge_with_cache
+from .report_generator import build_report
+from .shows_cache import merge_with_cache
 
 
 def _load_boost_snapshot():
     """Читает последний снимок ставок буста из boost_bids_history.csv.
     Returns: ({sku: {"bid_pct": float|None, "campaign": str}}, дата_снимка|None)."""
     import csv, os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boost_bids_history.csv")
+    path = os.path.join(DATA_DIR, "boost_bids_history.csv")
     if not os.path.exists(path):
         return {}, None
     rows = list(csv.DictReader(open(path, encoding="utf-8")))
@@ -77,7 +78,7 @@ def _record_daily_bids(run_date, api_bids_today: dict):
       prev    — ставки за предыдущую записанную дату {sku: bid_pct};
       history — вся накопленная история {date: {sku: bid_pct}}."""
     import csv, os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "boost_bids_daily.csv")
+    path = os.path.join(DATA_DIR, "boost_bids_daily.csv")
     today = run_date.isoformat()
     rows = []
     if os.path.exists(path):
@@ -169,7 +170,7 @@ def _get_netting_cached(run_date, date_from, date_to, recent_days=7):
     для колонки «Чистая прибыль ФАКТ ₽/шт за 7д» (в моменте, без сглаживания).
     Returns: (data, data_recent) — оба {(sku,model): {...}}."""
     import json, os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "netting_cache.json")
+    path = os.path.join(DATA_DIR, "netting_cache.json")
     today = run_date.isoformat()
     stale = None   # прошлый кэш — фолбэк, если перезапрос упадёт
     cached_on = None
@@ -217,7 +218,7 @@ def _get_netting_quarter_cached(run_date, date_from, date_to, valid_days=7):
     Returns: {(sku,model): {...}}."""
     import json, os
     from datetime import date as _date
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "netting_quarter_cache.json")
+    path = os.path.join(DATA_DIR, "netting_quarter_cache.json")
     stale = None   # прошлый кэш — фолбэк, если перезапрос упадёт
     if os.path.exists(path):
         try:
@@ -270,7 +271,7 @@ def _record_daily_promos(run_date, promo_prices: dict, write: bool = True):
     (по завершённой акции API уже ничего не отдаст, а в истории она останется).
     Returns: (history_days, meta)."""
     import json, os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "promo_daily.json")
+    path = os.path.join(DATA_DIR, "promo_daily.json")
     store = {"meta": {}, "days": {}}
     if os.path.exists(path):
         try:
@@ -320,7 +321,7 @@ def _get_months_netting_cached(run_date):
     (неполный) месяц тянется заново каждый прогон, пока не закроется.
     Returns: {"YYYY-MM": {(sku,model): {payout,buyer_pay,returns,services,promo,points,other,qty,ret_qty}}}."""
     import json, os, calendar
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "netting_months_cache.json")
+    path = os.path.join(DATA_DIR, "netting_months_cache.json")
     cache = {}
     if os.path.exists(path):
         try:
@@ -380,7 +381,7 @@ def _record_fby_stock(run_date, stocks):
     (повторный прогон за день перезаписывает). БЕЗ обрезки — храним всё.
     Returns: {"YYYY-MM-DD": {sku: {"fit": int, "available": int}}}."""
     import json, os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fby_stock_daily.json")
+    path = os.path.join(DATA_DIR, "fby_stock_daily.json")
     hist = {}
     if os.path.exists(path):
         try:
@@ -407,7 +408,7 @@ def _get_ums_cached(run_date, date_from, date_to):
     Pickle, а не JSON — в fee_detail даты живут как datetime, важно сохранить типы.
     Returns: (fee_detail, boost_detail)."""
     import os, pickle
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ums_cache.pkl")
+    path = os.path.join(DATA_DIR, "ums_cache.pkl")
     key = (run_date.isoformat(), date_from.isoformat(), date_to.isoformat())
     if os.path.exists(path):
         try:
@@ -431,7 +432,7 @@ def _df_from_shows_cache(date_from, date_to):
     """Фолбэк: строит df показов из shows_cache.json, когда отчёт shows-sales
     недоступен (3×420 у Яндекса и т.п.). Данные могут быть на день старее,
     но отчёт выйдет, а не упадёт весь прогон."""
-    from shows_cache import load_cache
+    from .shows_cache import load_cache
     rows = []
     for ds, skus in load_cache().items():
         try:
