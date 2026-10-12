@@ -6,7 +6,7 @@
 
 ![Лист «Сверка выплат»: прибыль на штуку по каждому артикулу с подсветкой](docs/screenshot-sverka.png)
 
-<sub>Скриншоты на выдуманных данных; пересобрать — `python3 docs/make_screenshots.py`.</sub>
+*Здесь и ниже — скриншоты на выдуманных данных, это не цифры реального магазина.*
 
 ## Установка одной командой
 
@@ -77,6 +77,9 @@ ym-agent run --en0        # macOS: в обход VPN, если он режет �
 git clone https://github.com/surgaev/yandex-market-agent-public && cd yandex-market-agent-public
 uv run ym-agent run
 ```
+
+Скриншоты для README собираются из выдуманных данных: `python3 docs/make_screenshots.py`
+(нужен Google Chrome).
 
 ## Лицензия
 
