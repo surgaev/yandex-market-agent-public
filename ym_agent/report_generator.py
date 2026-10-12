@@ -196,7 +196,8 @@ def build_report(
     # показывает, что реально пошло в файл; жёлтая — если хоть где-то фолбэк.
     health = kwargs.get("data_health") or {}
     if health:
-        labels = {"shows": "Воронка", "promo": "Акции", "netting": "Выплаты 30д", "netting90": "Выплаты 90д"}
+        labels = {"shows": "Воронка", "promo": "Акции", "netting": "Выплаты 30д", "netting90": "Выплаты 90д",
+                  "price_index": "Индекс цен"}
         parts = [f"{labels.get(k, k)}: {v}" for k, v in health.items() if k in labels]
         degraded = any(("⚠️" in v or "❌" in v) for v in health.values())
         ws1.merge_cells("A2:H2")

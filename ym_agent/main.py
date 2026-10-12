@@ -681,8 +681,15 @@ def run(run_date: date):
 
     # 6b. Новые срезы: индекс цен + отзывы (качество карточек уже в offers)
     print("\n6b. Загружаем привлекательность цен...")
-    price_reco = get_price_recommendations()
-    print(f"   Рекомендации цен для {len(price_reco)} SKU")
+    # Индекс цен — вспомогательный лист: 500 от offers/recommendations (12.10.2026)
+    # не должен ронять весь отчёт, как и отзывы ниже.
+    try:
+        price_reco = get_price_recommendations()
+        print(f"   Рекомендации цен для {len(price_reco)} SKU")
+    except Exception as e:
+        print(f"   ⚠️  индекс цен недоступен ({str(e)[:120]}); лист «Индекс цен» будет пустым")
+        price_reco = {}
+        DATA_HEALTH["price_index"] = "❌ нет (API индекса цен недоступен)"
 
     print("   Загружаем отзывы...")
     try:
