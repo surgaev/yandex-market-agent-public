@@ -9,6 +9,7 @@ Excel report. Основные листы:
 """
 
 import os
+from .boost_metrics import estimate as boost_estimate, percentage as boost_percentage, weighted_share
 import statistics
 from datetime import date, timedelta
 
@@ -196,7 +197,7 @@ def build_report(
     # показывает, что реально пошло в файл; жёлтая — если хоть где-то фолбэк.
     health = kwargs.get("data_health") or {}
     if health:
-        labels = {"shows": "Воронка", "promo": "Акции", "netting": "Выплаты 30д", "netting90": "Выплаты 90д",
+        labels = {"shows": "Воронка", "promo": "Акции", "netting": "Финансы", "netting90": "Выплаты 90д",
                   "price_index": "Индекс цен"}
         parts = [f"{labels.get(k, k)}: {v}" for k, v in health.items() if k in labels]
         degraded = any(("⚠️" in v or "❌" in v) for v in health.values())
@@ -211,23 +212,23 @@ def build_report(
     # ── Totals row ──
     ws1.append([])
     row = 3
-    headers = ["Период", "Показы", "Клики", "CTR", "В корзину", "CR показ→корз", "Заказы", "Заказы с бустом"]
+    headers = ["Период", "Показы", "Клики", "CTR", "В корзину", "CR показ→корз", "Заказы", "Доля заказов с бустом, %"]
     for c, h in enumerate(headers, 1):
         ws1.cell(row=row, column=c, value=h)
     _style_header_row(ws1, row, len(headers))
 
     def total_row(label, df):
         if df.empty:
-            return [label, 0, 0, "—", 0, "—", 0, 0]
+            return [label, 0, 0, "—", 0, "—", 0, "—"]
         shows  = df["shows"].fillna(0).sum() if "shows" in df.columns else 0
         clicks = df["clicks"].fillna(0).sum() if "clicks" in df.columns else 0
         carts  = df["carts"].fillna(0).sum() if "carts" in df.columns else 0
         orders = df["orders"].fillna(0).sum() if "orders" in df.columns else 0
-        o_boost= df["orders_promo"].fillna(0).sum() if "orders_promo" in df.columns else 0
+        o_boost = weighted_share(df.to_dict("records"), "orders", "orders_boost_pct")
         ctr    = _pct(clicks, shows)
         cr     = _pct(carts, shows)
         return [label, int(shows), int(clicks), f"{ctr}%" if ctr else "—",
-                int(carts), f"{cr}%" if cr else "—", int(orders), int(o_boost)]
+                int(carts), f"{cr}%" if cr else "—", int(orders), o_boost if o_boost is not None else "—"]
 
     for label, df in [
         (f"Вчера ({yesterday.strftime('%d.%m')})", df_yesterday),
@@ -444,7 +445,7 @@ def build_report(
         "CTR карт.\nвчера", "CTR карт.\nпозавч.",
         "% в корзину\nвчера", "% в корзину\nпозавч.",
         f"Заказы\n{yesterday.strftime('%d.%m')}", f"Заказы\n{day_before.strftime('%d.%m')}",
-        "Буст\nвчера", "% буста\nвчера",
+        "Заказы с бустом\n≈ вчера", "% заказов с бустом\nвчера",
         "Статус",
     ]
     # COL indices (1-based): Остаток FBS=3, Остаток FBY=4, Показы вчера=5, Показы позавч=6,
@@ -492,7 +493,8 @@ def build_report(
         carts_avg = rolling_avg(sku, "carts")
         orders_y = _v(y, "orders"); orders_db = _v(db, "orders")
         orders_avg = rolling_avg(sku, "orders")
-        boost_y  = _v(y, "orders_promo")
+        boost_pct_y = boost_percentage(_vnone(y, "orders_boost_pct"))
+        boost_y = boost_estimate(orders_y, boost_pct_y)
         on_sf = sku in storefront_skus if storefront_skus else None
         stock_fbs = fbs_stocks_map.get(sku, {}).get("available", 0)
         stock_fby = fby_stocks_map.get(sku, {}).get("available", 0)
@@ -502,8 +504,7 @@ def build_report(
         # Берём ГОТОВЫЙ процент из API (shows_boost_pct). Раньше тут считалось
         # shows_promo/shows — т.е. доля показов С АКЦИЕЙ, подписанная как «буст».
         bshow_y = _vnone(y, "shows_boost_pct")
-        bshow_avg = rolling_avg(sku, "shows_boost_pct")
-        bshow_avg = round(bshow_avg, 1) if bshow_avg else None
+        bshow_avg = weighted_share(df_rolling[df_rolling["shopSku"] == sku].to_dict("records"), "shows", "shows_boost_pct")
 
         corr_stock.append(stock_total)
         corr_shows.append(shows_y)
@@ -540,8 +541,8 @@ def build_report(
             f"{_pct(carts_y, clicks_y)}%" if _pct(carts_y, clicks_y) else "—",
             f"{_pct(carts_db, clicks_db)}%" if _pct(carts_db, clicks_db) else "—",
             int(orders_y), int(orders_db),
-            int(boost_y),
-            f"{_pct(boost_y, orders_y)}%" if _pct(boost_y, orders_y) else "—",
+            round(boost_y, 2) if boost_y is not None else "—",
+            f"{boost_pct_y}%" if boost_pct_y is not None else "—",
             status,
         ]
         ws2.append(row_data)
@@ -1656,44 +1657,41 @@ def build_report(
             for d in all_dates:
                 rr = by_date.get(d)
                 if rr is None:
-                    shows_series.append(0); vis_series.append(None); bsh_series.append(None)
-                    boost_series.append(0); org_series.append(0)
+                    shows_series.append(None); vis_series.append(None); bsh_series.append(None)
+                    boost_series.append(None); org_series.append(None)
                     continue
-                sh = pd.to_numeric(rr.get("shows"), errors="coerce")
-                sb = pd.to_numeric(rr.get("shows_promo"), errors="coerce")
+                sh_raw = pd.to_numeric(rr.get("shows"), errors="coerce")
+                sh = None if pd.isna(sh_raw) else float(sh_raw)
+                pct = boost_percentage(rr.get("shows_boost_pct"))
+                boosted = boost_estimate(sh, pct)
                 vi = pd.to_numeric(rr.get("visibility"), errors="coerce")
-                sh = 0 if pd.isna(sh) else int(sh)
-                sbv = 0 if pd.isna(sb) else int(sb)
                 shows_series.append(sh)
-                boost_series.append(sbv)
-                org_series.append(max(sh - sbv, 0))
+                boost_series.append(boosted)
+                org_series.append(sh - boosted if sh is not None and boosted is not None else None)
                 vis_series.append(None if pd.isna(vi) else round(float(vi), 1))
-                if sh > 0:
-                    bsh_series.append(round(sbv / sh * 100, 1))
-                else:
-                    bsh_series.append(None)
+                bsh_series.append(pct if sh else None)
 
             # Correlations (pair only days where the metric is present)
-            rb_pairs = [(b, s) for b, s in zip(bsh_series, shows_series) if b is not None]
-            rv_pairs = [(v, s) for v, s in zip(vis_series, shows_series) if v is not None]
+            rb_pairs = [(b, s) for b, s in zip(bsh_series, shows_series) if b is not None and s is not None]
+            rv_pairs = [(v, s) for v, s in zip(vis_series, shows_series) if v is not None and s is not None]
             r_boost = _corr([p[0] for p in rb_pairs], [p[1] for p in rb_pairs])
             r_vis = _corr([p[0] for p in rv_pairs], [p[1] for p in rv_pairs])
 
             base = ws_vb.max_row + 1
-            shows_avg = round(sum(shows_series) / N, 1) if N else 0
-            boost_avg = round(sum(boost_series) / N, 1) if N else 0
-            org_avg = round(sum(org_series) / N, 1) if N else 0
+            shows_avg = round(sum(shows_series) / N, 1) if N and all(v is not None for v in shows_series) else None
+            boost_avg = round(sum(boost_series) / N, 1) if N and all(v is not None for v in boost_series) else None
+            org_avg = round(sum(org_series) / N, 1) if N and all(v is not None for v in org_series) else None
             vis_nn = [v for v in vis_series if v is not None]
             bsh_nn = [b for b in bsh_series if b is not None]
             vis_avg = round(sum(vis_nn) / len(vis_nn), 1) if vis_nn else None
-            bsh_avg = round(sum(bsh_nn) / len(bsh_nn), 1) if bsh_nn else None
+            bsh_avg = weighted_share([{"shows":n,"pct":p} for n,p in zip(shows_series,bsh_series)], "shows", "pct")
 
             # Подписи строк счётных показов — для подсветки лейбла и формата
-            COUNT_LABELS = ("Показы всего", "Показы орг.", "Показы буст")
+            COUNT_LABELS = ("Показы всего", "Показы без буста ≈", "Показы с бустом ≈")
             metric_rows = [
                 ("Показы всего", shows_series, shows_avg, None),
-                ("Показы орг.", org_series, org_avg, None),
-                ("Показы буст", boost_series, boost_avg, None),
+                ("Показы без буста ≈", org_series, org_avg, None),
+                ("Показы с бустом ≈", boost_series, boost_avg, None),
                 ("Видим.%", vis_series, vis_avg, "0"),
                 ("% буста", bsh_series, bsh_avg, "0.0"),
             ]
@@ -1703,9 +1701,9 @@ def build_report(
                 lcell = ws_vb.cell(row=r, column=3, value=mlabel)
                 lcell.font = _tfont(bold=True)
                 # тинт лейбла: органика — зелёный, буст — оранжевый
-                if mlabel == "Показы орг.":
+                if mlabel == "Показы без буста ≈":
                     lcell.fill = _fill(GREEN_LT)
-                elif mlabel == "Показы буст":
+                elif mlabel == "Показы с бустом ≈":
                     lcell.fill = _fill(ORANGE_LT)
                 for j, d in enumerate(all_dates):
                     val = series[j]
@@ -1715,7 +1713,7 @@ def build_report(
                     cell.alignment = _center()
                     if mlabel in COUNT_LABELS:
                         cell.number_format = '#,##0'
-                        if avg > 0 and val:
+                        if avg is not None and avg > 0 and val:
                             if val > avg * 1.3:
                                 cell.fill = _fill(GREEN_LT)
                             elif val == 0:
@@ -1804,7 +1802,7 @@ def build_report(
     ue_date_to = kwargs.get("date_to")
     boost_bids_ue = kwargs.get("boost_bids", {}) or {}
     boost_detail_ue = kwargs.get("boost_detail", {}) or {}
-    netting_ue = kwargs.get("netting", {}) or {}
+
     if all_fee_orders:
         from .cost_prices import get_cost_price, TAX_RATE
         from .fbs_fby_client import DELIVERED_STATUSES, RETURN_STATUSES
@@ -1890,10 +1888,10 @@ def build_report(
             "Доставл.\nвчера", "Доставл.\nпозавч.",
             "Цена\nпродажи", "Факт.\nвыручка\n/ед.", "Софин.\nЯндекса\n/ед.", "Себест.", "Налог\n7%",
         ] + [lbl for _, lbl in COMM_LABELS] + [
-            "Итого\nкомиссии", "Чистая\nприбыль\n/ед.", "Чистая\nприбыль/ед\nФАКТ",
-            "Чистая\nприбыль ФАКТ\nитого ₽",
+            "Итого\nкомиссии", "Чистая\nприбыль\n/ед.", "Вклад/ед\nсм. новый лист",
+            "Вклад итого\nсм. новый лист",
             "Промо\nцена", "Прибыль по\nпромо-цене\n(БЕЗ баллов)", "Цена vs\nиндекс цен",
-            "Маржа %\n(расчёт)", "Маржа %\nФАКТ", "Затраты\nвозвр.",
+            "Маржа %\n(расчёт)", "Факт: см.\nЭкономика заказов", "Затраты\nвозвр.",
             "Переплата\nFEE\n(аномалии)", "Чистая\nвыручка\n(расчёт)",
             "Ставка\nбуста %\n(тек)", "Макс.\nставка %\n(+100₽)",
             "Сраб.\nставка %\n(факт 14д)",
@@ -1921,15 +1919,10 @@ def build_report(
             "Полезен, чтобы видеть, как отработал аукцион (сраб. ставка обычно ниже "
             "выставленной — аукцион второй цены).", "агент")
         ws10.cell(row=hdr_row, column=COL_PROMO_PROFIT).comment = Comment(
-            "МОДЕЛЬ, а не факт: промо-цена − налог 7% − комиссии − себест.\n"
-            "Баллы Яндекса в формулу НЕ входят, поэтому промо-прибыль занижена:\n"
-            "по части скидок Яндекс доплачивает баллами («Баллы за скидку Маркета»).\n"
-            "ФАКТ по деньгам — лист «Сверка выплат»: снижение цены там уже сидит\n"
-            "в «Платежах покуп.» (покупатель просто заплатил меньше), а колонки\n"
-            "🟢 «БАЛЛЫ ₽/шт» и 🔴 «УСЛУГИ ЗА СЧЁТ БАЛЛОВ ₽/шт» показывают замкнутый\n"
-            "контур бонусного баланса: Яндекс кладёт баллы за скидку, которую\n"
-            "профинансировал сам, и тут же списывает ими твои услуги (размещение/\n"
-            "буст/логистика). Разница осмысленна по каталогу (+6–10%), но не по SKU.", "агент")
+            "Модель по текущей цене и настройкам затрат, не фактическая прибыль. "
+            "Денежный вклад с привязкой услуг к заказам — на листе «Экономика заказов». "
+            "Баллы отражены отдельно. «Сверка выплат» показывает движение денег "
+            "по датам операций и не используется для расчёта прибыли.", "агент")
 
         # Aggregate per (sku, type).
         # Commissions split: delivered vs returned, so return costs
@@ -2218,34 +2211,9 @@ def build_report(
                 pcell.fill = _fill(RED_LIGHT)
                 pcell.font = _tfont(bold=True, color="B71C1C")
 
-            # ── Чистая прибыль/ед ФАКТ (из реальных выплат netting за 30д) ──
-            # Сравниваем расчётную прибыль с фактической: видно, сколько на самом
-            # деле компенсирует Яндекс (зелёным — факт ≥ расчёта, красным — меньше).
-            nt = netting_ue.get((sku, tag))
-            if nt and nt.get("qty", 0) > 0:
-                net_q = nt["qty"] - nt.get("ret_qty", 0)   # чистые штуки = продано − возвраты
-                # Возвраты годные → себест на чистые штуки, налог с нетто-выручки.
-                fact_profit_tot = round(nt["payout"] - cost * net_q
-                                        - (nt["buyer_pay"] + nt.get("returns", 0)) * 0.07, 2)
-                fact_profit_pu = round(fact_profit_tot / net_q, 2) if net_q > 0 else 0
-                fact_margin = round(fact_profit_tot / nt["buyer_pay"] * 100, 1) if nt["buyer_pay"] else 0
-                fcell = ws10.cell(row=r, column=COL_PROFIT_FACT, value=fact_profit_pu)
-                fcell.number_format = '#,##0.00'
-                ftot = ws10.cell(row=r, column=COL_PROFIT_FACT_TOT, value=fact_profit_tot)
-                ftot.number_format = '#,##0'
-                fmar = ws10.cell(row=r, column=COL_MARGIN_FACT, value=fact_margin)
-                fmar.number_format = '0.0"%"'
-                # подсветка: факт/ед vs расчёт/ед
-                clr = "1B5E20" if fact_profit_pu >= profit_est else "B71C1C"
-                fill = GREEN_LT if fact_profit_pu >= profit_est else RED_LIGHT
-                for cc in (fcell, ftot):
-                    cc.fill = _fill(fill); cc.font = _tfont(bold=True, color=clr)
-                # маржа факт: своя подсветка по уровню
-                fmar.fill = _fill(GREEN_LT if fact_margin >= 20 else RED_LIGHT if fact_margin < 5 else YELLOW_LT)
-            else:
-                ws10.cell(row=r, column=COL_PROFIT_FACT, value="—")
-                ws10.cell(row=r, column=COL_PROFIT_FACT_TOT, value="—")
-                ws10.cell(row=r, column=COL_MARGIN_FACT, value="—")
+            # Cash-period payouts are deliberately not divided by delivered units.
+            for col in (COL_PROFIT_FACT, COL_PROFIT_FACT_TOT, COL_MARGIN_FACT):
+                ws10.cell(row=r, column=col, value="см. Экономика заказов")
 
             # Color promo profit cell
             if promo:
@@ -2968,847 +2936,18 @@ def build_report(
             r += 1
         wsq.auto_filter.ref = f"A{hr}:{get_column_letter(ncol)}{r-1}"
 
-    # ══════════════════════════════════════════════════════════════════════════
-    # ЛИСТ: СВЕРКА / ВЫПЛАТЫ (что реально перевёл Яндекс по артикулам, FBS/FBY)
-    # ══════════════════════════════════════════════════════════════════════════
-    # Импорт явный: раньше имя приезжало из секции «Юнит-экономика», а она под
-    # `if all_fee_orders:` — без заказов вся сверка падала на NameError.
-    from .cost_prices import get_cost_price
-    netting = kwargs.get("netting", {}) or {}
-    netting_from = kwargs.get("netting_from")
-    netting_to = kwargs.get("netting_to")
-    # Квартальный нетинг (90д) — устойчивая маржа; агрегируем по SKU (без FBS/FBY).
-    netting_quarter = kwargs.get("netting_quarter", {}) or {}
-    nq_from = kwargs.get("netting_quarter_from")
-    nq_to = kwargs.get("netting_quarter_to")
-    q_by_sku = {}
-    for (qsku, _qmodel), qa in netting_quarter.items():
-        acc = q_by_sku.setdefault(qsku, {"qty": 0.0, "ret_qty": 0.0, "buyer_pay": 0.0,
-                                         "payout": 0.0, "returns": 0.0,
-                                         "promo": 0.0, "points": 0.0})
-        for k in ("qty", "ret_qty", "buyer_pay", "payout", "returns", "promo", "points"):
-            acc[k] += qa.get(k, 0)
-
-    # Последние N дней (по умолчанию 7) — «в моменте», без сглаживания. Не путать с
-    # Σ 90д: тут сознательно НЕ усредняем, если данных мало — цифра просто шумная/0.
-    netting_recent = kwargs.get("netting_recent", {}) or {}
-    netting_recent_days = kwargs.get("netting_recent_days", 7)
-    recent_by_sku = {}
-    for (rsku, _rmodel), ra in netting_recent.items():
-        acc = recent_by_sku.setdefault(rsku, {"qty": 0.0, "ret_qty": 0.0, "buyer_pay": 0.0,
-                                              "payout": 0.0, "returns": 0.0})
-        for k in ("qty", "ret_qty", "buyer_pay", "payout", "returns"):
-            acc[k] += ra.get(k, 0)
-
-    def _profit_pu(agg_for_sku, sku_for):
-        """Чистая прибыль/шт из компактного агрегата {qty,ret_qty,buyer_pay,payout,returns}.
-        0, если данных за период нет (напр. 0 продаж за последние 7 дней)."""
-        if not agg_for_sku or agg_for_sku.get("qty", 0) <= 0:
-            return 0.0
-        qty = agg_for_sku["qty"]; net_q = qty - agg_for_sku.get("ret_qty", 0)
-        if net_q <= 0:
-            return 0.0
-        cost = (get_cost_price(sku_for) or 0) * net_q
-        tax = (agg_for_sku["buyer_pay"] + agg_for_sku.get("returns", 0)) * 0.07
-        profit = agg_for_sku["payout"] - cost - tax
-        return round(profit / net_q, 2)
-
-    # ── ВЗВЕШЕННАЯ ₽/шт: бакеты 0–30д и 31–90д, вес по объёму И свежести ────────
-    # Окна нетинга ВЛОЖЕНЫ (7д ⊂ 30д ⊂ 90д) — усреднять их напрямую нельзя (тройной
-    # счёт свежих дней). Поэтому режем на НЕПЕРЕСЕКАЮЩИЕСЯ бакеты: 0–30д и 31–90д
-    # (= 90д − 30д покомпонентно; законно, т.к. формула прибыли линейна по агрегату).
-    # 7-дневное окно в расчёт НЕ входит осознанно: замер по каталогу показал, что
-    # оно смещено вниз на ~122 ₽/шт (медиана) при разбросе σ≈263 ₽/шт и 68% SKU ниже
-    # квартальной базы. Это артефакт ЛАГА ВЫПЛАТ (штуки считаются по «Платёж
-    # покупателя», а услуги за те же заказы удерживаются неделями позже, т.е. на
-    # коротком окне payments и services относятся к РАЗНЫМ заказам), а не экономика.
-    # Класть такую подвыборку в оценку с любым весом — значит систематически занижать.
-    W_RECENT, W_OLD = 2.0, 1.0   # 2:1 ≈ экспоненц. затухание с полупериодом ~45 дней
-    THIN_UNITS = 10              # меньше — цифра ненадёжна, красим серым
-    NETT_FIELDS = ("qty", "ret_qty", "buyer_pay", "payout", "returns")
-
-    n30_by_sku = {}
-    for (s30, _m30), a30 in netting.items():
-        acc = n30_by_sku.setdefault(s30, {f: 0.0 for f in NETT_FIELDS})
-        for f in NETT_FIELDS:
-            acc[f] += a30.get(f, 0)
-
-    def _profit_of(agg_for_sku, sku_for):
-        """(прибыль ₽, чистые штуки) из сырого агрегата. Та же формула, что у Σ 90д;
-        линейна по агрегату → применима и к РАЗНОСТИ периодов (бакет 31–90д)."""
-        if not agg_for_sku:
-            return 0.0, 0.0
-        net_q = agg_for_sku.get("qty", 0) - agg_for_sku.get("ret_qty", 0)
-        if net_q <= 0:
-            return 0.0, 0.0
-        cost = (get_cost_price(sku_for) or 0) * net_q
-        tax = (agg_for_sku.get("buyer_pay", 0) + agg_for_sku.get("returns", 0)) * 0.07
-        return agg_for_sku.get("payout", 0) - cost - tax, net_q
-
-    def _old_bucket(a_q, a_new):
-        """Бакет 31–90д = 90д − 30д покомпонентно. None, если разность невалидна:
-        90-дневный кэш живёт 7 дней, и его окно заканчивается РАНЬШЕ 30-дневного
-        (у 30д кэш на сутки) → у части SKU штуки в разности уходят в ноль/минус.
-        Такой бакет отбрасываем целиком — оценка строится на одном свежем окне.
-        Деньги НЕ клампим: returns/payout законно отрицательные, обнуление их
-        сломало бы прибыль."""
-        if not a_q:
-            return None
-        diff = {f: a_q.get(f, 0) - (a_new.get(f, 0) if a_new else 0) for f in NETT_FIELDS}
-        if diff["qty"] < 0 or (diff["qty"] - diff["ret_qty"]) <= 0:
-            return None
-        return diff
-
-    blend_by_sku = {}   # sku -> (взвеш. ₽/шт, тренд ₽/шт|None, чист. штук в расчёте)
-    blend_tot_num = blend_tot_den = 0.0   # для строки ИТОГО (агрегат, не среднее средних)
-    for _s in set(n30_by_sku) | set(q_by_sku):
-        a_new = n30_by_sku.get(_s)
-        a_old = _old_bucket(q_by_sku.get(_s), a_new)
-        p_new, n_new = _profit_of(a_new, _s)
-        p_old, n_old = _profit_of(a_old, _s)
-        W = W_RECENT * n_new + W_OLD * n_old
-        if W <= 0:
-            continue
-        blended = (W_RECENT * p_new + W_OLD * p_old) / W
-        blend_tot_num += W_RECENT * p_new + W_OLD * p_old
-        blend_tot_den += W
-        # Тренд в ₽/шт, а НЕ в %: при базе ≈0 проценты взрываются на порядки
-        # (реальный пример — +3260% там, где сдвиг всего +157 ₽/шт).
-        trend = ((p_new / n_new) - (p_old / n_old)) if (n_new and n_old) else None
-        blend_by_sku[_s] = (round(blended, 2),
-                            round(trend, 1) if trend is not None else None,
-                            n_new + n_old)
-
-    if netting:
-        wsn = wb.create_sheet("Сверка выплат")
-        ozon_ppu, ozon_date = load_ozon_ppu(report_folder)
-        wsn.sheet_properties.tabColor = "C0392B"
-        period = (f"{netting_from.strftime('%d.%m')}–{netting_to.strftime('%d.%m.%Y')}"
-                  if netting_from and netting_to else "")
-        nnote = (f"РЕАЛЬНЫЕ выплаты от Яндекса по артикулам (отчёт «По платежам») за {period}. "
-                 f"К перечислению ФАКТ = Платежи покуп. − Услуги − Возвраты − Скидка акций + Баллы + Прочее "
-                 f"(все статьи — отдельные проводки Яндекса, в сумме = реальные деньги на счёт). "
-                 f"«Удержано услуги» = «Оплата услуг Яндекс.Маркета» (комиссия+буст+логистика+хранение). "
-                 f"«Скидка акций» (−) — твоя скидка по акции (реально уменьшает). «Баллы-компенсация» (+) — "
-                 f"Яндекс возвращает часть скидки баллами. Их разница = твоя непокрытая доля скидки. "
-                 f"«Прочее» — контроль, должно быть ≈0. «Чистая прибыль ФАКТ» = к перечислению − себест(на ЧИСТЫЕ "
-                 f"штуки, продано−возвраты) − налог 7% (с нетто-выручки). Возвраты возвращаются годными на склад, "
-                 f"поэтому их себест/налог НЕ списываем; реальная цена возврата — только логистика туда-обратно (в «Услугах»). "
-                 f"«ФАКТ ₽/шт» = прибыль / (Продано − Возвраты), т.е. на чистую (выкупленную) штуку. "
-                 f"Выплаты смещены: оплаты приходят через дни/недели после заказа — поэтому дневной "
-                 f"₽/шт скачет. Оранжевая строка «Σ 90д» под каждым SKU — устойчивая КВАРТАЛЬНАЯ "
-                 f"чистая прибыль (без разбивки FBS/FBY), где смещение усредняется; на неё и ориентируйся. "
-                 f"«ФАКТ ₽/шт (посл. {netting_recent_days}д)» — СИГНАЛ в моменте, а НЕ оценка прибыльности: "
-                 f"на таком коротком окне выплаты и удержания относятся к разным заказам, поэтому цифра "
-                 f"смещена вниз (медиана −122 ₽/шт к кварталу, разброс σ≈263) — по ней смотрят «что-то "
-                 f"изменилось», но не «сколько зарабатываю»; 0 = продаж за период не было. "
-                 f"⭐ «ВЗВЕШ. ₽/шт» — ГЛАВНАЯ цифра «сколько артикул реально приносит сейчас»: два "
-                 f"НЕПЕРЕСЕКАЮЩИХСЯ бакета (0–30д и 31–90д) с весом 2:1 по свежести и с весом по объёму "
-                 f"продаж (≈ затухание с полупериодом 45 дней). Окна нетинга вложены (7д⊂30д⊂90д), поэтому "
-                 f"усреднять их напрямую нельзя — тройной счёт; 7д в расчёт не входит осознанно (см. выше). "
-                 f"СЕРАЯ цифра = меньше {THIN_UNITS} чистых штук за квартал, статистике не верить. "
-                 f"«Тренд ₽/шт» = ₽/шт(0–30д) − ₽/шт(31–90д): + значит маржа артикула растёт, − падает "
-                 f"(в рублях, а не в %, т.к. при базе около нуля проценты взлетают на порядки). "
-                 f"ДВЕ ПОСЛЕДНИЕ КОЛОНКИ — это ЗАМКНУТЫЙ КОНТУР БОНУСНОГО БАЛАНСА, а не движение "
-                 f"живых денег: у обеих в отчёте статус начинается со слова «Справочно» "
-                 f"(«Справочно: пополнен баланс» / «Справочно: списан с баланса»), тогда как у реальных "
-                 f"денег статусы другие («Переведён по графику выплат», «Удержан из платежей покупателей»). "
-                 f"Механика: Яндекс САМ финансирует скидку покупателю → пополняет твой бонусный баланс "
-                 f"баллами → тут же списывает с этого баланса оплату твоих услуг. "
-                 f"🟢 «БАЛЛЫ ₽/шт» (+): «Баллы за скидку Маркета/Плюс» — сколько Яндекс положил на баланс. "
-                 f"Привязаны К ТОВАРУ (кол-во в проводках = штукам). "
-                 f"🔴 «УСЛУГИ ЗА СЧЁТ БАЛЛОВ ₽/шт» (−): строка «Скидка за участие в совместных акциях» — "
-                 f"название обманчивое, по факту это ТВОИ УСЛУГИ, оплаченные с бонусного баланса "
-                 f"(размещение ~81%, буст ~11%, логистика ~8%). Кол-во во ВСЕХ таких проводках = 0, "
-                 f"к цене товара отношения НЕ имеет — поэтому строка бывает и у артикула ВНЕ всяких акций "
-                 f"(у него тоже есть услуги); на штуки делим только для сопоставимости. "
-                 f"РАЗНИЦА ОСМЫСЛЕННА НА УРОВНЕ КАТАЛОГА, А НЕ ОТДЕЛЬНОГО SKU: по каталогу Яндекс кладёт "
-                 f"на баланс на 6–10% больше, чем списывает — "
-                 f"т.е. участие в акциях в целом бесплатно и слегка в плюс. Но по одному артикулу разница "
-                 f"НЕНАДЁЖНА: баллы считаются по товару, а списание — по услугам, с собственным расчётным "
-                 f"периодом, поэтому половинки пары часто попадают в разные окна (отсюда разброс от −83 "
-                 f"до +94 ₽/шт — это рассинхрон учёта, а не разная экономика товаров). "
-                 f"ВАЖНО: само снижение цены по акции отдельной строкой в отчёте НЕ проходит — "
-                 f"покупатель просто платит меньше, и это уже сидит в «Платежах покуп.», "
-                 f"а значит и в «Чистой прибыли ФАКТ». Отдельной цифры «во что обошлась скидка» "
-                 f"не существует: это недополученная выручка, а не расход.")
-        nnote += (f" СРАВНЕНИЕ С ОЗОНОМ (колонки рядом с ⭐ВЗВЕШ): «ОЗОН ₽/ед» — прибыль на штуку "
-                  f"из отчёта ozon_report_{ozon_date}, «Δ ЯМ−Озон» — насколько ⭐ВЗВЕШ Яндекса "
-                  f"выше (+) или ниже (−) Озона. Артикулы сопоставляются точным совпадением; "
-                  f"прочерк — на Озоне этого артикула нет. Методики площадок разные (у Озона "
-                  f"данные из выгрузки начислений, у Яндекса — взвешенная по 90 дням), поэтому "
-                  f"смотреть на знак и порядок разницы, а не на точные рубли."
-                  if ozon_ppu else " Сравнение с Озоном недоступно: отчёт ozon_report_*.xlsx не найден.")
-        wsn["A1"] = nnote
-        wsn["A1"].font = _tfont(sz=10, color="555555"); wsn["A1"].alignment = _left()
-        wsn.row_dimensions[1].height = 100
-
-        nheads = ["Товар", "SKU", "Модель", "Продано\nшт.", "Возвр.\nшт.",
-                  "Платежи\nпокуп. ₽", "Удержано\nуслуги ₽", "Возвраты ₽",
-                  "Скидка\nакций ₽", "Баллы-\nкомпенс. ₽", "Прочее ₽",
-                  "К перечисл.\nФАКТ ₽", "Себест. ₽", "Налог\n7% ₽",
-                  "Чистая\nприбыль\nФАКТ ₽", "Чистая\nприбыль\nФАКТ ₽/шт", "Маржа %",
-                  f"ФАКТ ₽/шт\n(посл. {netting_recent_days}д)",
-                  "⭐ ВЗВЕШ.\n₽/шт", "Тренд\n₽/шт",
-                  "🟢 БАЛЛЫ\n₽/шт", "🔴 УСЛУГИ ЗА\nСЧЁТ БАЛЛОВ\n₽/шт",
-                  "ОЗОН\n₽/ед", "Δ ЯМ−Озон\n₽/шт"]
-        wsn.merge_cells(f"A1:{get_column_letter(len(nheads))}1")
-        # Строки собираются в ЛОГИЧЕСКОМ порядке nheads, а в лист пишутся в ФИЗИЧЕСКОМ:
-        # две главные цифры — «ФАКТ ₽/шт» (16) и «⭐ ВЗВЕШ.» (19) — стоят сразу после
-        # «Модели» и закреплены вместе с ней, чтобы считывались без прокрутки.
-        # Одна перестановка на все типы строк (по моделям / Σ 90д / ИТОГО), а не
-        # правка каждого списка значений — так колонки не могут разъехаться.
-        PHYS_ORDER = [1, 2, 3, 16, 19, 23, 24, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13,
-                      14, 15, 17, 18, 20, 21, 22]
-        phys = {logical: pos for pos, logical in enumerate(PHYS_ORDER, 1)}
-
-        def _reorder(lst):
-            return [lst[i - 1] for i in PHYS_ORDER]
-
-        # денежные колонки; прибыль/шт (16), (18)–(22) с копейками — номера логические
-        MONEY_N = tuple(phys[c] for c in (6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 18, 19, 20,
-                                          21, 22, 23, 24))
-        COL_PU = phys[16]; COL_MAR = phys[17]; COL_PROF = phys[15]; COL_COSTN = phys[13]
-        COL_PU_RECENT = phys[18]; COL_BLEND = phys[19]; COL_TREND = phys[20]
-        COL_POINTS_PU = phys[21]; COL_PREMIUM_PU = phys[22]
-        COL_OZON = phys[23]; COL_OZON_DIFF = phys[24]
-        DEC_COLS = (COL_PU, COL_PU_RECENT, COL_BLEND, COL_TREND,
-                    COL_POINTS_PU, COL_PREMIUM_PU, COL_OZON, COL_OZON_DIFF)
-
-        def _ozon_vals(sku_for, ym_ppu):
-            """[Озон ₽/ед, Δ ЯМ−Озон]. Сопоставление ТОЛЬКО по точному совпадению
-            артикула: префиксное «похоже» уже подводило (SKUbl ≠ SKUblk), а
-            здесь цена ошибки — сравнение экономики разных товаров."""
-            oz = ozon_ppu.get(str(sku_for))
-            if oz is None:
-                return ["—", "—"]
-            if not isinstance(ym_ppu, (int, float)):
-                return [oz, "—"]
-            return [oz, round(ym_ppu - oz, 2)]
-
-        def _style_ozon(rr, bold=False):
-            oc_ = wsn.cell(row=rr, column=COL_OZON)
-            dc_ = wsn.cell(row=rr, column=COL_OZON_DIFF)
-            if not isinstance(oc_.value, (int, float)):
-                oc_.font = _tfont(bold=bold, color="999999")
-                dc_.font = _tfont(bold=bold, color="999999")
-                return
-            oc_.font = _tfont(bold=bold, color="1B5E20" if oc_.value > 0 else "B71C1C")
-            if isinstance(dc_.value, (int, float)):
-                dc_.font = _tfont(bold=True, color="1B5E20" if dc_.value > 0 else "B71C1C")
-                dc_.fill = _fill(GREEN_LT if dc_.value > 0 else RED_LIGHT)
-
-        def _tier_fill(cell, val, bold=True, font_color=None):
-            """Светофор для ₽/шт: > 100 — зелёный, 50–100 — жёлтый, < 50 — красный."""
-            if not isinstance(val, (int, float)):
-                return
-            if val > 100:
-                fill, color = GREEN_LT, "1B5E20"
-            elif val >= 50:
-                fill, color = YELLOW_LT, "7D6608"
-            else:
-                fill, color = RED_LIGHT, "B71C1C"
-            cell.fill = _fill(fill)
-            cell.font = _tfont(bold=bold, color=font_color or color)
-
-        def _cofin_pu(agg):
-            """(баллы ₽/шт, услуги-за-счёт-баллов ₽/шт) на ЧИСТУЮ штуку — РАЗДЕЛЬНО.
-
-            Это ЗАМКНУТЫЙ КОНТУР БОНУСНОГО БАЛАНСА, не движение живых денег: у обеих
-            статей статус в отчёте начинается со «Справочно» («пополнен баланс» /
-            «списан с баланса»), тогда как у реальных денег статусы «Переведён по
-            графику выплат» / «Удержан из платежей покупателей». Яндекс сам финансирует
-            скидку покупателю → пополняет баланс баллами → списывает с него твои услуги.
-            Проверено на сыром отчёте «По платежам» (935 строк за 30д):
-              • points «Баллы за скидку Маркета/Плюс» (+) — сколько положено на баланс.
-                Привязаны К ТОВАРУ, кол-во = штукам.
-              • promo «Скидка за участие в совместных акциях» (−) — название обманчивое:
-                это ТВОИ УСЛУГИ, оплаченные с баланса (размещение −146.9к, буст −20.2к,
-                логистика −14.5к). Кол-во во ВСЕХ строках = 0, к цене товара не
-                относится → бывает и у SKU вне всяких акций. На штуки делим лишь
-                для сопоставимости, это не «цена за штуку».
-            ⚠️ РАЗНИЦА осмысленна ПО КАТАЛОГУ (+6–10%: Яндекс кладёт больше, чем
-            списывает), но НЕ по одному SKU: половинки пары считаются на разной базе и
-            в разных расчётных периодах, поэтому по артикулу это в основном рассинхрон
-            учёта. Ни то, ни другое НЕ есть «стоимость снижения цены»: снижение цены
-            отдельной проводки не имеет, покупатель просто платит меньше (уже в buyer_pay).
-            Возвращает (None, None), если ни баллов, ни списаний не было."""
-            if not agg:
-                return None, None
-            promo = agg.get("promo", 0); points = agg.get("points", 0)
-            if not promo and not points:
-                return None, None
-            net_q = agg.get("qty", 0) - agg.get("ret_qty", 0)
-            if net_q <= 0:
-                return None, None
-            return round(points / net_q, 2), round(promo / net_q, 2)
-        hr = 2
-        for c, h in enumerate(_reorder(nheads), 1):
-            wsn.cell(row=hr, column=c, value=h)
-        _style_header_row(wsn, hr, len(nheads), "C0392B")
-        for col in (COL_PU, COL_BLEND):   # главные колонки — своим цветом шапки
-            wsn.cell(row=hr, column=col).fill = _fill("1F3A5F")
-        wsn.row_dimensions[hr].height = 40
-
-        tot = {"qty": 0.0, "retq": 0.0, "buyer": 0.0, "serv": 0.0, "ret": 0.0, "promo": 0.0,
-               "points": 0.0, "other": 0.0, "payout": 0.0, "cost": 0.0, "tax": 0.0,
-               "profit": 0.0}
-        r = hr
-        band = False          # чередование оттенка по артикулу
-        prev_sku = None
-
-        def _style_blend(rr, sku_for, bold=False):
-            """Красит «ВЗВЕШ. ₽/шт» и «Тренд ₽/шт». Серый = мало штук за квартал
-            (цифру НЕ подгоняем сжатием к среднему — иначе она перестанет биться
-            с остальным листом; просто помечаем как ненадёжную)."""
-            bl = blend_by_sku.get(sku_for)
-            if not bl:
-                return
-            blended, trend, units = bl
-            thin = units < THIN_UNITS
-            bc = wsn.cell(row=rr, column=COL_BLEND)
-            # светофор по порогам; у «тонкого» SKU цвет фона остаётся, а цифра серая —
-            # видно и уровень, и то, что статистике по нему верить рано
-            _tier_fill(bc, blended, bold=True, font_color="999999" if thin else None)
-            # Тренд у «тонкого» SKU так же ненадёжен, как и сама цифра — гасим и его,
-            # иначе скачок на 3 штуках читается как сигнал.
-            tc = wsn.cell(row=rr, column=COL_TREND)
-            if thin or trend is None:
-                tc.font = _tfont(bold=bold, color="999999")
-            else:
-                tc.font = _tfont(bold=bold, color="1B5E20" if trend > 0 else
-                                 "B71C1C" if trend < 0 else "555555")
-
-        def _blend_vals(sku_for):
-            """Значения двух новых колонок — одинаковые на всех строках SKU (как у
-            колонки 7д), чтобы работали сортировка и фильтр по любой строке."""
-            bl = blend_by_sku.get(sku_for)
-            if not bl:
-                return ["", ""]
-            return [bl[0], bl[1] if bl[1] is not None else "—"]
-
-        def _style_cofin(rr, pts_pu, prem_pu, bold=False):
-            """Баллы — всегда доход (зелёный), премия — всегда расход (красный).
-            Цвет тут постоянный по смыслу колонки, а не по знаку: так сразу читается,
-            что слева приход, справа удержание. «—» = проводок не было."""
-            pc = wsn.cell(row=rr, column=COL_POINTS_PU)
-            if pts_pu is None:
-                pc.font = _tfont(bold=bold, color="999999")
-            else:
-                pc.fill = _fill(GREEN_LT); pc.font = _tfont(bold=True, color="1B5E20")
-            mc = wsn.cell(row=rr, column=COL_PREMIUM_PU)
-            if prem_pu is None:
-                mc.font = _tfont(bold=bold, color="999999")
-            else:
-                mc.fill = _fill(RED_LIGHT); mc.font = _tfont(bold=True, color="B71C1C")
-
-        def emit_quarter_row(rr, sku_for):
-            """Итоговая строка «Σ 90д» по SKU (без разбивки FBS/FBY) — устойчивая
-            квартальная чистая прибыль (не скачет от смещения выплат)."""
-            qa = q_by_sku.get(sku_for)
-            if not qa or qa["qty"] <= 0:
-                return rr
-            qty = qa["qty"]; net_q = qty - qa["ret_qty"]
-            buyer = qa["buyer_pay"]; payout = qa["payout"]
-            # Возвраты годные → себест на ЧИСТЫЕ штуки, налог с нетто-выручки.
-            cost = round((get_cost_price(sku_for) or 0) * net_q, 2)
-            tax = round((buyer + qa.get("returns", 0)) * 0.07, 2)
-            profit = round(payout - cost - tax, 2)
-            ppu = round(profit / net_q, 2) if net_q > 0 else 0
-            margin = round(profit / buyer * 100, 1) if buyer else 0
-            rr += 1
-            recent_pu = _profit_pu(recent_by_sku.get(sku_for), sku_for)
-            # Скидку/баллы в квартальной строке показываем СУММАМИ (столбцы 9/10),
-            # чтобы нетто-цифра справа была проверяема глазами прямо в строке.
-            q_pts, q_prem = _cofin_pu(qa)
-            vals = ["", sku_for, "Σ 90д", int(qty), int(qa["ret_qty"]), round(buyer),
-                    "", "", round(qa.get("promo", 0)), round(qa.get("points", 0)), "",
-                    round(payout), cost, tax, profit, ppu, margin,
-                    recent_pu] + _blend_vals(sku_for) + [
-                    q_pts if q_pts is not None else "—",
-                    q_prem if q_prem is not None else "—"] + \
-                    _ozon_vals(sku_for, _blend_vals(sku_for)[0])
-            for c, v in enumerate(_reorder(vals), 1):
-                cell = wsn.cell(row=rr, column=c, value=v)
-                cell.border = _border(); cell.fill = _fill("FDEBD0")   # квартальная — оранж.
-                cell.font = _tfont(bold=True)
-                cell.alignment = _left() if c == 1 else _center() if c > 2 else _left()
-                if c in MONEY_N and isinstance(v, (int, float)):
-                    cell.number_format = '#,##0' if c not in DEC_COLS else '#,##0.00'
-            _style_cofin(rr, q_pts, q_prem, bold=True)
-            wsn.cell(row=rr, column=COL_PROF).font = _tfont(
-                bold=True, color="1B5E20" if profit > 0 else "B71C1C")
-            if net_q > 0:
-                _tier_fill(wsn.cell(row=rr, column=COL_PU), ppu)
-            rcc = wsn.cell(row=rr, column=COL_PU_RECENT)
-            rcc.font = _tfont(bold=True, color="1B5E20" if recent_pu > 0 else
-                              "999999" if recent_pu == 0 else "B71C1C")
-            _style_blend(rr, sku_for, bold=True)
-            _style_ozon(rr, bold=True)
-            return rr
-
-        # сортировка по артикулу ↑, затем по модели
-        for (sku, model), a in sorted(netting.items(), key=lambda kv: (str(kv[0][0]), kv[0][1])):
-            if sku != prev_sku:
-                if prev_sku is not None:
-                    r = emit_quarter_row(r, prev_sku)   # закрыть предыдущий SKU
-                band = not band
-                prev_sku = sku
-            shade = GREY_LT if band else None
-            qty = a.get("qty", 0)
-            ret_q = a.get("ret_qty", 0)
-            net_q = qty - ret_q                   # чистые штуки = продано − возвраты
-            buyer = a.get("buyer_pay", 0)
-            returns_rub = a.get("returns", 0)     # возврат платежа покупателю (отриц.)
-            payout = a.get("payout", 0)
-            cost_u = get_cost_price(sku) or 0
-            # Возвраты возвращаются годными на склад → себест НЕ списываем на них
-            # (только на чистые штуки), налог 7% с нетто-выручки (за вычетом возвратов).
-            cost = round(cost_u * net_q, 2)
-            tax = round((buyer + returns_rub) * 0.07, 2)
-            profit = round(payout - cost - tax, 2)
-            profit_pu = round(profit / net_q, 2) if net_q > 0 else 0   # на чистую штуку
-            margin = round(profit / buyer * 100, 1) if buyer else 0
-            r += 1
-            recent_pu = _profit_pu(netting_recent.get((sku, model)), sku)
-            vals = [name_by_sku.get(sku, sku)[:50], sku, model, int(qty), int(ret_q),
-                    buyer, a.get("services", 0), a.get("returns", 0),
-                    a.get("promo", 0), a.get("points", 0), a.get("other", 0), payout,
-                    cost, tax, profit, profit_pu, margin,
-                    recent_pu] + _blend_vals(sku)
-            pts_pu, prem_pu = _cofin_pu(a)
-            vals = vals + [pts_pu if pts_pu is not None else "—",
-                           prem_pu if prem_pu is not None else "—"] + \
-                   _ozon_vals(sku, _blend_vals(sku)[0])
-            for c, v in enumerate(_reorder(vals), 1):
-                cell = wsn.cell(row=r, column=c, value=v)
-                cell.border = _border()
-                cell.alignment = _left() if c == 1 else _center() if c > 2 else _left()
-                if shade:                         # чередование строк по артикулу
-                    cell.fill = _fill(shade)
-                if c in MONEY_N and isinstance(v, (int, float)):
-                    cell.number_format = '#,##0' if c not in DEC_COLS else '#,##0.00'
-            # смысловые цвета — через ШРИФТ (чтобы не перекрывать чередование фоном);
-            # исключение — две главные колонки ₽/шт: у них светофор фоном
-            pc = wsn.cell(row=r, column=COL_PROF)
-            pc.font = _tfont(bold=True, color="1B5E20" if profit > 0 else "B71C1C")
-            if net_q > 0:                          # без чистых штук ₽/шт = 0 условный
-                _tier_fill(wsn.cell(row=r, column=COL_PU), profit_pu)
-            mc = wsn.cell(row=r, column=COL_MAR)
-            mc.font = _tfont(bold=True, color="1B5E20" if margin >= 20 else
-                             "B71C1C" if margin < 5 else "9A7D0A")
-            rc = wsn.cell(row=r, column=COL_PU_RECENT)
-            rc.font = _tfont(bold=True, color="1B5E20" if recent_pu > 0 else
-                             "999999" if recent_pu == 0 else "B71C1C")
-            if cost_u == 0:
-                cc = wsn.cell(row=r, column=COL_COSTN)
-                cc.font = _tfont(bold=True, color="E65100")
-            _style_blend(r, sku)
-            _style_cofin(r, pts_pu, prem_pu)
-            _style_ozon(r)
-            tot["qty"] += qty; tot["retq"] += ret_q; tot["buyer"] += buyer
-            tot["serv"] += a.get("services", 0)
-            tot["ret"] += a.get("returns", 0); tot["promo"] += a.get("promo", 0)
-            tot["points"] += a.get("points", 0); tot["other"] += a.get("other", 0)
-            tot["payout"] += payout
-            tot["cost"] += cost; tot["tax"] += tax; tot["profit"] += profit
-
-        # закрыть последний SKU квартальной строкой
-        if prev_sku is not None:
-            r = emit_quarter_row(r, prev_sku)
-
-        # ИТОГО
-        r += 1
-        net_tot = tot["qty"] - tot["retq"]
-        tot_pu = round(tot["profit"] / net_tot, 2) if net_tot > 0 else 0
-        ws_tot = ["ИТОГО", "", "", int(tot["qty"]), int(tot["retq"]),
-                  round(tot["buyer"]), round(tot["serv"]),
-                  round(tot["ret"]), round(tot["promo"]), round(tot["points"]), round(tot["other"]),
-                  round(tot["payout"]), round(tot["cost"]), round(tot["tax"]),
-                  round(tot["profit"]), tot_pu,
-                  round(tot["profit"]/tot["buyer"]*100, 1) if tot["buyer"] else 0, "—",
-                  round(blend_tot_num / blend_tot_den, 2) if blend_tot_den else "—", "—",
-                  # ИТОГО: средние по каталогу. Обманчивы (разброс по SKU огромный) —
-                  # предупреждение про это стоит в шапке листа.
-                  (round(tot["points"] / net_tot, 2)
-                   if net_tot > 0 and tot["points"] else "—"),
-                  (round(tot["promo"] / net_tot, 2)
-                   if net_tot > 0 and tot["promo"] else "—"),
-                  # в ИТОГО межплощадочное сравнение не считаем: средняя по разным
-                  # наборам артикулов на двух площадках сравнивала бы несопоставимое
-                  "—", "—"]
-        for c, v in enumerate(_reorder(ws_tot), 1):
-            cell = wsn.cell(row=r, column=c, value=v)
-            cell.border = _border(); cell.fill = _fill(GREY_LT); cell.font = _tfont(bold=True)
-            cell.alignment = _center() if c > 2 else _left()
-            if c in MONEY_N and isinstance(v, (int, float)):
-                cell.number_format = '#,##0' if c not in DEC_COLS else '#,##0.00'
-        _tier_fill(wsn.cell(row=r, column=COL_PU), ws_tot[16 - 1])
-        _tier_fill(wsn.cell(row=r, column=COL_BLEND), ws_tot[19 - 1])
-
-        wsn.column_dimensions["A"].width = 40
-        wsn.column_dimensions["B"].width = 13
-        wsn.column_dimensions["C"].width = 8
-        for i in range(4, len(nheads) + 1):
-            wsn.column_dimensions[get_column_letter(i)].width = 12
-        wsn.column_dimensions[get_column_letter(COL_POINTS_PU)].width = 12
-        wsn.column_dimensions[get_column_letter(COL_PREMIUM_PU)].width = 14
-        wsn.column_dimensions[get_column_letter(COL_PU)].width = 13
-        wsn.column_dimensions[get_column_letter(COL_BLEND)].width = 13
-        wsn.column_dimensions[get_column_letter(COL_TREND)].width = 12
-        wsn.column_dimensions[get_column_letter(COL_OZON)].width = 11
-        wsn.column_dimensions[get_column_letter(COL_OZON_DIFF)].width = 12
-        # закреплены A–G: две главные цифры и сравнение с Озоном видны без прокрутки
-        wsn.freeze_panes = f"{get_column_letter(COL_OZON_DIFF + 1)}3"
-        wsn.auto_filter.ref = f"A{hr}:{get_column_letter(len(nheads))}{r-1}"
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ЛИСТ: КОРЗИНА vs ПОКУПКА (воронка от КЛИКА, а не от показа)
-    # Отличие от «Дырявой воронки»: та считает от ПОКАЗОВ и потому мешает в одну
-    # цифру две разные проблемы (плохой CTR и плохую карточку). Здесь база — КЛИК,
-    # т.е. человек уже зашёл в карточку: видно отдельно, убеждает ли она положить
-    # в корзину и доводит ли корзину до оплаты.
-    # ══════════════════════════════════════════════════════════════════════════
-    if not pv_clicks.empty and not pv_carts.empty and active_skus:
-        rows_f = []
-        for sku in active_skus:
-            cl = float(pv_clicks.loc[sku].sum()) if sku in pv_clicks.index else 0.0
-            ca = float(pv_carts.loc[sku].sum()) if sku in pv_carts.index else 0.0
-            od = float(pv_orders.loc[sku].sum()) if sku in pv_orders.index else 0.0
-            if cl < 1:
-                continue
-            rows_f.append({"sku": sku, "clicks": cl, "carts": ca, "orders": od,
-                           "k2c": ca / cl * 100 if cl else 0,
-                           "k2o": od / cl * 100 if cl else 0,
-                           "c2o": od / ca * 100 if ca else None})
-        # Нормы — МЕДИАНЫ по каталогу (а не выдуманные пороги): что «низко» зависит
-        # от ниши, и фиксированные 30/50% в другой категории врали бы.
-        med_k2c = statistics.median([x["k2c"] for x in rows_f]) if rows_f else 0
-        c2o_vals = [x["c2o"] for x in rows_f if x["c2o"] is not None and x["carts"] >= 3]
-        med_c2o = statistics.median(c2o_vals) if c2o_vals else 0
-
-        for x in rows_f:
-            # Потенциал: сколько заказов было бы, дотяни корзина→заказ до медианы.
-            gap_ord = max(0.0, x["carts"] * med_c2o / 100 - x["orders"]) if x["carts"] else 0.0
-            pu = (blend_by_sku.get(x["sku"]) or (None,))[0]
-            x["lost_orders"] = gap_ord
-            x["lost_rub"] = round(gap_ord * pu) if (pu and pu > 0) else None
-            x["no_order_carts"] = max(0.0, x["carts"] - x["orders"])
-            # Диагноз: разделяем «не кладут» и «кладут, но не платят»
-            if x["clicks"] < 15:
-                x["diag"] = "мало кликов — не судить"
-            elif x["c2o"] is not None and x["c2o"] < med_c2o * 0.6 and x["carts"] >= 3:
-                x["diag"] = "🔴 кладут, но не покупают"
-            elif x["k2c"] < med_k2c * 0.6:
-                x["diag"] = "🟡 карточка не убеждает"
-            elif x["c2o"] is not None and x["c2o"] >= med_c2o:
-                x["diag"] = "🟢 норма"
-            else:
-                x["diag"] = "—"
-        rows_f.sort(key=lambda x: -(x["lost_rub"] or 0))
-
-        wsk = wb.create_sheet("Корзина vs Покупка")
-        wsk.sheet_properties.tabColor = "6C3483"
-        knote = (f"Воронка от КЛИКА за {len(all_dates)}д (человек уже открыл карточку). "
-                 f"«Клик→корзина» — убеждает ли карточка положить товар; «Корзина→заказ» — "
-                 f"доводится ли корзина до оплаты. Медианы каталога: клик→корзина "
-                 f"{med_k2c:.1f}%, корзина→заказ {med_c2o:.1f}% — это и есть норма, "
-                 f"пороги не выдуманные. 🔴 «кладут, но не покупают» = корзина→заказ ниже "
-                 f"60% от медианы: товар интересен, но на финише что-то мешает — цена в "
-                 f"корзине, срок/стоимость доставки, наличие, конкурент дешевле. "
-                 f"🟡 «карточка не убеждает» = мало кладут в корзину (контент/фото/цена). "
-                 f"«Потеряно ₽» = сколько бы принесли недостающие заказы, дотяни корзина→заказ "
-                 f"до медианы, по ставке ВЗВЕШ ₽/шт с листа «Сверка выплат» (только для SKU "
-                 f"с положительной прибылью; иначе прочерк — доводить убыточное незачем). "
-                 f"ВАЖНО: часть корзин — это «отложил на потом», а не отказ; поэтому цифра — "
-                 f"верхняя граница потенциала, а не гарантированные деньги.")
-        kheads = ["Товар", "SKU", "Клики", "Корзины", "Заказы",
-                  "Клик→\nкорзина %", "Клик→\nзаказ %", "Корзина→\nзаказ %",
-                  "Корзин без\nзаказа, шт", "Недобрано\nзаказов", "Потеряно ₽", "Диагноз"]
-        nk = len(kheads)
-        wsk.merge_cells(start_row=1, start_column=1, end_row=1, end_column=nk)
-        wsk.cell(row=1, column=1, value=knote).font = _tfont(sz=10, color="555555")
-        wsk.cell(row=1, column=1).alignment = _left()
-        wsk.row_dimensions[1].height = 74
-        for c, h in enumerate(kheads, 1):
-            wsk.cell(row=2, column=c, value=h)
-        _style_header_row(wsk, 2, nk, "6C3483")
-        wsk.row_dimensions[2].height = 34
-
-        rk = 2
-        for x in rows_f:
-            rk += 1
-            vals = [name_by_sku.get(x["sku"], x["sku"])[:45], x["sku"],
-                    int(x["clicks"]), int(x["carts"]), int(x["orders"]),
-                    round(x["k2c"], 1), round(x["k2o"], 1),
-                    round(x["c2o"], 1) if x["c2o"] is not None else "—",
-                    int(x["no_order_carts"]), round(x["lost_orders"], 1),
-                    x["lost_rub"] if x["lost_rub"] is not None else "—", x["diag"]]
-            for c, v in enumerate(vals, 1):
-                cell = wsk.cell(row=rk, column=c, value=v)
-                cell.border = _border()
-                cell.alignment = _left() if c in (1, nk) else _center() if c > 2 else _left()
-                if c in (6, 7, 8) and isinstance(v, (int, float)):
-                    cell.number_format = '0.0"%"'
-                if c == 11 and isinstance(v, (int, float)):
-                    cell.number_format = '#,##0'
-            c2o_c = wsk.cell(row=rk, column=8)
-            if x["c2o"] is not None and x["carts"] >= 3:
-                if x["c2o"] < med_c2o * 0.6:
-                    c2o_c.fill = _fill(RED_LIGHT); c2o_c.font = _tfont(bold=True, color="B71C1C")
-                elif x["c2o"] >= med_c2o:
-                    c2o_c.fill = _fill(GREEN_LT)
-            k2c_c = wsk.cell(row=rk, column=6)
-            if x["k2c"] < med_k2c * 0.6 and x["clicks"] >= 15:
-                k2c_c.fill = _fill(YELLOW_LT); k2c_c.font = _tfont(bold=True, color="9A7D0A")
-            if x["lost_rub"]:
-                lc = wsk.cell(row=rk, column=11)
-                lc.font = _tfont(bold=True, color="B71C1C")
-        wsk.column_dimensions["A"].width = 38
-        wsk.column_dimensions["B"].width = 14
-        for i in range(3, nk):
-            wsk.column_dimensions[get_column_letter(i)].width = 11
-        wsk.column_dimensions[get_column_letter(nk)].width = 26
-        wsk.freeze_panes = "C3"
-        wsk.auto_filter.ref = f"A2:{get_column_letter(nk)}{rk}"
-
-    # ══════════════════════════════════════════════════════════════════════════
-    # ЛИСТ: ПРИБЫЛЬ ПО МЕСЯЦАМ (помесячная раскладка по SKU; та же формула, что
-    # и Σ 90д на «Сверке выплат» — сырой агрегат из netting, профит здесь же)
-    # ══════════════════════════════════════════════════════════════════════════
-    netting_months = kwargs.get("netting_months", {}) or {}
-    if netting_months:
-        from .cost_prices import get_cost_price as _gcp_m
-
-        month_keys = sorted(netting_months)  # "YYYY-MM" сортируется лексикографически = хронологически
-        # агрегат по (SKU, месяц), сумма моделей FBS+FBY
-        by_sku_month = {}   # sku -> {month_key: {qty, ret_qty, buyer_pay, payout, returns}}
-        for mk in month_keys:
-            for (sku, _model), a in netting_months[mk].items():
-                acc = by_sku_month.setdefault(sku, {}).setdefault(
-                    mk, {"qty": 0.0, "ret_qty": 0.0, "buyer_pay": 0.0, "payout": 0.0, "returns": 0.0})
-                for k in ("qty", "ret_qty", "buyer_pay", "payout", "returns"):
-                    acc[k] += a.get(k, 0)
-
-        def _month_profit(agg):
-            if not agg or agg.get("qty", 0) <= 0:
-                return None  # нет продаж в этом месяце — не 0, а «нет данных»
-            net_q = agg["qty"] - agg.get("ret_qty", 0)
-            if net_q <= 0:
-                return 0.0
-            cost = (_gcp_m(sku_row) or 0) * net_q
-            tax = (agg["buyer_pay"] + agg.get("returns", 0)) * 0.07
-            return round(agg["payout"] - cost - tax, 2)
-
-        def _month_net_q(agg):
-            """Чистые продажи = продано − возвраты (на них и делится прибыль)."""
-            if not agg or agg.get("qty", 0) <= 0:
-                return None
-            return agg["qty"] - agg.get("ret_qty", 0)
-
-        # прибыль по SKU по месяцам + итог по SKU (для сортировки топ-вниз)
-        sku_profits = {}      # sku -> {month_key: profit|None}
-        sku_netq = {}         # sku -> {month_key: чистые штуки|None}
-        sku_totals = {}       # sku -> Σ прибыль по всем месяцам
-        for sku_row, months_agg in by_sku_month.items():
-            row = {}
-            qrow = {}
-            for mk in month_keys:
-                row[mk] = _month_profit(months_agg.get(mk))
-                qrow[mk] = _month_net_q(months_agg.get(mk))
-            sku_profits[sku_row] = row
-            sku_netq[sku_row] = qrow
-            sku_totals[sku_row] = sum(v for v in row.values() if v is not None)
-
-        grand_total = sum(sku_totals.values())
-        month_totals = {mk: sum(v.get(mk) or 0 for v in sku_profits.values()) for mk in month_keys}
-        month_netq = {mk: sum(v.get(mk) or 0 for v in sku_netq.values()) for mk in month_keys}
-
-        wsm = wb.create_sheet("Прибыль по месяцам")
-        wsm.sheet_properties.tabColor = "8E44AD"
-        mnote = ("Помесячная чистая прибыль ФАКТ по SKU (та же формула, что «Σ 90д» на «Сверке выплат»): "
-                 "прибыль = К перечисл. (united-netting) − себест.(чистые штуки) − налог 7% (с нетто-выручки). "
-                 "Завершённые месяцы кэшируются навсегда (не пересчитываются задним числом); последний "
-                 "столбец — текущий незавершённый месяц, обновляется каждый прогон. Пустая ячейка — "
-                 "продаж по SKU в этом месяце не было (не 0). Отсортировано по вкладу в общую прибыль ↓. "
-                 "На каждый месяц три колонки: «шт. чистые» — продано минус возвраты (именно на них "
-                 "делится прибыль: возврат уезжает обратно на склад, себестоимость по нему не списывается), "
-                 "«прибыль ₽» и «₽/шт». В строке ИТОГО ₽/шт — это Σприбыли ÷ Σштук по каталогу, "
-                 "а не среднее по колонке. Цвет ₽/шт как на «Сверке выплат»: >100 ₽ зелёный, "
-                 "50–100 ₽ жёлтый, <50 ₽ красный. После «Итого ₽» — «Итого шт.» (чистые штуки "
-                 "за все месяцы листа) и «Итого ₽/шт» = Итого ₽ ÷ Итого шт.: прибыль на штуку за "
-                 "весь период, не среднее помесячных ₽/шт.")
-        wsm.merge_cells(f"A1:{get_column_letter(2 + 3 * len(month_keys) + 4)}1")
-        wsm["A1"] = mnote
-        wsm["A1"].font = _tfont(sz=10, color="555555"); wsm["A1"].alignment = _left()
-        wsm.row_dimensions[1].height = 42
-
-        # На каждый месяц — три колонки: чистые продажи (шт), прибыль ₽ и ₽/шт.
-        # Шапка двухэтажная: месяц объединён над своей тройкой, под ним — подписи.
-        MONTH_COL0 = 3          # первая колонка первого месяца
-        PER_MONTH = 3
-        # Свой оттенок на каждый ТИП колонки (штуки / деньги / деньги на штуку) —
-        # месяцев много, и без этого взгляд теряет, в каком столбце что.
-        TINT_QTY, TINT_RUB, TINT_PPU = "E8F1F8", "FDF3E2", "EDE7F6"
-        TINTS = (TINT_QTY, TINT_RUB, TINT_PPU)
-        TOTAL_COL = MONTH_COL0 + PER_MONTH * len(month_keys)
-        TOTAL_QTY_COL = TOTAL_COL + 1   # чистые штуки за все месяцы листа
-        TOTAL_PPU_COL = TOTAL_COL + 2   # Итого ₽ ÷ Итого шт.
-        SHARE_COL = TOTAL_COL + 3
-        hr_m = 2                # строка с месяцами
-        hr_sub = 3              # строка с подписями колонок
-
-        wsm.cell(row=hr_m, column=1, value="Товар")
-        wsm.cell(row=hr_m, column=2, value="SKU")
-        wsm.merge_cells(start_row=hr_m, start_column=1, end_row=hr_sub, end_column=1)
-        wsm.merge_cells(start_row=hr_m, start_column=2, end_row=hr_sub, end_column=2)
-        for i, mk in enumerate(month_keys):
-            base = MONTH_COL0 + i * PER_MONTH
-            wsm.cell(row=hr_m, column=base, value=mk)
-            wsm.merge_cells(start_row=hr_m, start_column=base,
-                            end_row=hr_m, end_column=base + PER_MONTH - 1)
-            for off, sub in enumerate(("шт.\nчистые", "прибыль ₽", "₽/шт")):
-                wsm.cell(row=hr_sub, column=base + off, value=sub)
-        for col, title in ((TOTAL_COL, "Итого ₽"), (TOTAL_QTY_COL, "Итого\nшт."),
-                           (TOTAL_PPU_COL, "Итого\n₽/шт"), (SHARE_COL, "Доля %")):
-            wsm.cell(row=hr_m, column=col, value=title)
-            wsm.merge_cells(start_row=hr_m, start_column=col, end_row=hr_sub, end_column=col)
-        for hrow in (hr_m, hr_sub):
-            _style_header_row(wsm, hrow, SHARE_COL, "8E44AD")
-        # подписи под месяцем красим в цвет своего типа — шапка работает легендой
-        for i in range(len(month_keys)):
-            base = MONTH_COL0 + i * PER_MONTH
-            for off, tint in enumerate(TINTS):
-                sc_h = wsm.cell(row=hr_sub, column=base + off)
-                sc_h.fill = _fill(tint)
-                sc_h.font = _tfont(bold=True, color="333333")
-        wsm.row_dimensions[hr_m].height = 18
-        wsm.row_dimensions[hr_sub].height = 26
-
-        def _ppu_font(v, bold=False):
-            """₽/шт теми же порогами, что на «Сверке выплат»: >100 / 50–100 / <50.
-            Здесь только цветом шрифта — фоном на пять месяцев получилась бы рябь."""
-            return _tfont(bold=bold, color="1B5E20" if v > 100 else
-                          "7D6608" if v >= 50 else "B71C1C")
-
-        r = hr_sub
-        for sku_row in sorted(sku_totals, key=lambda s: -sku_totals[s]):
-            r += 1
-            share = round(sku_totals[sku_row] / grand_total * 100, 1) if grand_total else 0
-            wsm.cell(row=r, column=1, value=name_by_sku.get(sku_row, sku_row)[:50])
-            wsm.cell(row=r, column=2, value=sku_row)
-            for i, mk in enumerate(month_keys):
-                base = MONTH_COL0 + i * PER_MONTH
-                v = sku_profits[sku_row][mk]
-                nq = sku_netq[sku_row][mk]
-                qc = wsm.cell(row=r, column=base, value=int(nq) if nq is not None else None)
-                qc.fill = _fill(TINT_QTY)
-                if nq is not None:
-                    qc.number_format = '#,##0'
-                cell = wsm.cell(row=r, column=base + 1, value=v)
-                cell.fill = _fill(TINT_RUB)
-                if v is not None:
-                    cell.number_format = '#,##0'
-                    cell.font = _tfont(color="1B5E20" if v > 0 else "B71C1C" if v < 0 else "999999")
-                # ₽/шт считаем только когда есть чистые штуки: иначе делить не на что
-                ppu = round(v / nq, 2) if (v is not None and nq) else None
-                pc = wsm.cell(row=r, column=base + 2, value=ppu)
-                pc.fill = _fill(TINT_PPU)
-                if ppu is not None:
-                    pc.number_format = '#,##0'
-                    pc.font = _ppu_font(ppu)
-            tc = wsm.cell(row=r, column=TOTAL_COL, value=round(sku_totals[sku_row]))
-            tc.number_format = '#,##0'
-            tc.font = _tfont(bold=True, color="1B5E20" if sku_totals[sku_row] > 0 else "B71C1C")
-            # штуки берём только за месяцы, где есть прибыль, — те же, что сложены в Итого ₽
-            tot_q = sum(sku_netq[sku_row][mk] or 0 for mk in month_keys
-                        if sku_profits[sku_row][mk] is not None)
-            qc = wsm.cell(row=r, column=TOTAL_QTY_COL, value=int(tot_q))
-            qc.number_format = '#,##0'; qc.fill = _fill(TINT_QTY)
-            tot_ppu = round(sku_totals[sku_row] / tot_q, 2) if tot_q else None
-            pc = wsm.cell(row=r, column=TOTAL_PPU_COL, value=tot_ppu)
-            pc.fill = _fill(TINT_PPU)
-            if tot_ppu is not None:
-                pc.number_format = '#,##0'
-                pc.font = _ppu_font(tot_ppu, bold=True)
-            sc = wsm.cell(row=r, column=SHARE_COL, value=share)
-            if share >= 10:
-                sc.fill = _fill(GREEN_LT)
-            elif share >= 5:
-                sc.fill = _fill(YELLOW_LT)
-            for c in range(1, SHARE_COL + 1):
-                cell = wsm.cell(row=r, column=c)
-                cell.border = _border()
-                cell.alignment = _left() if c == 1 else _center()
-
-        # ИТОГО по месяцам
-        r += 1
-        wsm.cell(row=r, column=1, value="ИТОГО")
-        for i, mk in enumerate(month_keys):
-            base = MONTH_COL0 + i * PER_MONTH
-            qc = wsm.cell(row=r, column=base, value=int(month_netq[mk]))
-            qc.number_format = '#,##0'
-            cell = wsm.cell(row=r, column=base + 1, value=round(month_totals[mk]))
-            cell.number_format = '#,##0'
-            # ₽/шт по каталогу за месяц — не среднее из колонки, а Σприбыль/Σштуки
-            ppu = round(month_totals[mk] / month_netq[mk], 2) if month_netq[mk] else None
-            pc = wsm.cell(row=r, column=base + 2, value=ppu)
-            if ppu is not None:
-                pc.number_format = '#,##0'
-        tc = wsm.cell(row=r, column=TOTAL_COL, value=round(grand_total))
-        tc.number_format = '#,##0'
-        grand_q = sum(month_netq.values())
-        wsm.cell(row=r, column=TOTAL_QTY_COL, value=int(grand_q)).number_format = '#,##0'
-        grand_ppu = round(grand_total / grand_q, 2) if grand_q else None
-        wsm.cell(row=r, column=TOTAL_PPU_COL, value=grand_ppu).number_format = '#,##0'
-        for c in range(1, SHARE_COL + 1):
-            cell = wsm.cell(row=r, column=c)
-            cell.border = _border(); cell.fill = _fill(GREY_LT); cell.font = _tfont(bold=True)
-            cell.alignment = _left() if c == 1 else _center()
-        if grand_ppu is not None:
-            wsm.cell(row=r, column=TOTAL_PPU_COL).font = _ppu_font(grand_ppu, bold=True)
-        for i, mk in enumerate(month_keys):   # цвет ₽/шт по тем же порогам
-            ppu = wsm.cell(row=r, column=MONTH_COL0 + i * PER_MONTH + 2).value
-            if isinstance(ppu, (int, float)):
-                wsm.cell(row=r, column=MONTH_COL0 + i * PER_MONTH + 2).font = _ppu_font(ppu, bold=True)
-
-        # MoM % — прирост прибыли к предыдущему месяцу (в колонке прибыли)
-        r += 1
-        wsm.cell(row=r, column=1, value="MoM %")
-        for i, mk in enumerate(month_keys):
-            if i == 0:
-                continue
-            prev_v = month_totals[month_keys[i - 1]]
-            cur_v = month_totals[mk]
-            pct = round((cur_v - prev_v) / prev_v * 100, 1) if prev_v else None
-            cell = wsm.cell(row=r, column=MONTH_COL0 + i * PER_MONTH + 1,
-                            value=(f"{'+' if pct >= 0 else ''}{pct}%" if pct is not None else "—"))
-            cell.font = _tfont(bold=True, color="1B5E20" if (pct or 0) >= 0 else "B71C1C")
-        for c in range(1, SHARE_COL + 1):
-            cell = wsm.cell(row=r, column=c)
-            cell.border = _border(); cell.alignment = _left() if c == 1 else _center()
-            if c == 1:
-                cell.font = _tfont(bold=True)
-
-        wsm.column_dimensions["A"].width = 40
-        wsm.column_dimensions["B"].width = 13
-        for i, mk in enumerate(month_keys):
-            base = MONTH_COL0 + i * PER_MONTH
-            wsm.column_dimensions[get_column_letter(base)].width = 7      # шт
-            wsm.column_dimensions[get_column_letter(base + 1)].width = 11  # ₽
-            wsm.column_dimensions[get_column_letter(base + 2)].width = 8   # ₽/шт
-        wsm.column_dimensions[get_column_letter(TOTAL_COL)].width = 12
-        wsm.column_dimensions[get_column_letter(TOTAL_QTY_COL)].width = 8
-        wsm.column_dimensions[get_column_letter(TOTAL_PPU_COL)].width = 9
-        wsm.column_dimensions[get_column_letter(SHARE_COL)].width = 9
-        wsm.freeze_panes = f"C{hr_sub + 1}"
-        wsm.auto_filter.ref = f"A{hr_sub}:{get_column_letter(SHARE_COL)}{r-2}"
+    # Status-aware cash ledgers and separate order economics.
+    from .finance_report import add_finance_sheets
+    add_finance_sheets(wb, kwargs.get("finance_records", []),
+                       kwargs.get("finance_orders", []),
+                       kwargs.get("finance_from"), kwargs.get("finance_to"),
+                       kwargs.get("finance_health", "Нет финансовых данных"))
 
     # ══════════════════════════════════════════════════════════════════════════
     # ПОРЯДОК ЛИСТОВ
     # ══════════════════════════════════════════════════════════════════════════
     desired_order = [
-        "Дашборд", "Скидки FEE по заказам", "Сверка выплат", "Прибыль по месяцам",
+        "Дашборд", "Скидки FEE по заказам", "Сверка выплат", "Экономика заказов", "Деньги по месяцам",
         "Юнит-экономика",
         # Листы динамики идут в порядке ВОРОНКИ: показы → клики → CTR →
         # корзины → клик/корзина → покупки → клик/покупка.

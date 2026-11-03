@@ -435,148 +435,17 @@ def _generate_netting_report(date_from: date, date_to: date) -> str:
     raise RuntimeError("united-netting rate limit exhausted")
 
 
-_NETTING_HEADERS = {
-    "model":  "модели работы",
-    "date":   "дата транзакции",
-    "sku":    "ваш sku",
-    "qty":    "количество",
-    "amount": "сумма транзакции",
-    "source": "источник транзакции",
-}
-
-
-def _netting_columns(ws) -> dict:
-    """{поле: 0-based индекс колонки} по заголовкам строки 2 отчёта «По платежам».
-    Если хоть одного обязательного заголовка нет (или он неоднозначен) — падаем,
-    чтобы вызывающий откатился на прошлый кэш, а не записал мусор поверх него."""
-    header = [" ".join(str(c.value or "").split()).lower() for c in ws[2]]
-    col = {}
-    for field, needle in _NETTING_HEADERS.items():
-        hits = [i for i, h in enumerate(header) if needle in h]
-        if len(hits) != 1:
-            raise RuntimeError(
-                f"структура отчёта «По платежам» изменилась: заголовок «{needle}» "
-                f"найден {len(hits)} раз (ожидался 1). Колонки: {header}")
-        col[field] = hits[0]
-    return col
-
-
 def fetch_netting(date_from: date, date_to: date, recent_days: int | None = None,
-                  strict_window: bool = False) -> dict:
-    """РЕАЛЬНЫЕ движения денег от Яндекса по артикулам за период.
-    Отчёт «По платежам» (united-netting), лист «Отчёт о платежах».
+                  strict_window: bool = True) -> dict:
+    """Status-separated ledger, schema v2. Does not calculate profit.
 
-    Колонки ищутся ПО ЗАГОЛОВКАМ (строка 2), а не по позициям: Яндекс уже дважды
-    менял структуру (03.09.2026 вставил "Ставка НДС"/"Сумма НДС, ₽" перед "Тип
-    транзакции" — источник сдвинулся с 23-й колонки на 25-ю, и полтора дня весь
-    netting молча падал в "Прочее" с Продано=0, успев закэшироваться).
-    Сумма транзакций по SKU = чистая выплата продавцу (уже минус комиссии/буст/возвраты).
-
-    Если recent_days задан — попутно (без доп. запроса) строится второй агрегат
-    только по строкам с датой транзакции >= date_to - recent_days + 1 (напр. «последние
-    7 дней» внутри уже загруженного 30-дневного отчёта).
-
-    Returns: {(sku, model): {payout, buyer_pay, returns, services, other, qty}}
-             либо (out, out_recent), если recent_days задан.
+    Legacy caches containing payout/points/promo mixed together must not be used.
+    All sums are bounded by transaction date. Unknown statuses remain separate.
     """
-    # Генерация отчёта у Яндекса иногда отваливается со статусом FAILED за доли
-    # секунды — разовый сбой на их стороне (10.09.2026 так пропал весь столбец
-    # текущего месяца на листе «Прибыль по месяцам»). Битый отчёт не чинится
-    # опросом: нужен новый reportId, поэтому повторяем генерацию целиком.
-    for attempt in range(3):
-        print(f"  Generating united-netting report {date_from} → {date_to}...")
-        rid = _generate_netting_report(date_from, date_to)
-        print(f"  reportId={rid}, waiting...")
-        try:
-            url = _wait_for_report(rid, max_wait_sec=240)
-            break
-        except (RuntimeError, TimeoutError) as e:
-            if attempt == 2:
-                raise
-            print(f"  отчёт не собрался ({str(e)[:90]}), перегенерируем через 30s "
-                  f"({attempt + 1}/3)...")
-            time.sleep(30)
-    r = _request_raw_with_retry("GET", url, retries=5, timeout=180)
-    r.raise_for_status()
-    wb = openpyxl.load_workbook(io.BytesIO(r.content), data_only=True)
-    ws = wb["Отчёт о платежах"]
-    col = _netting_columns(ws)
-    out = {}
-    out_recent = {} if recent_days is not None else None
-    recent_cutoff = (date_to - timedelta(days=recent_days - 1)) if recent_days else None
-    unknown_sources = {}
-
-    def _acc(bucket, key, amount, qty, s):
-        a = bucket.setdefault(key, {"payout": 0.0, "buyer_pay": 0.0, "returns": 0.0,
-                                    "services": 0.0, "promo": 0.0, "points": 0.0,
-                                    "other": 0.0, "qty": 0.0, "ret_qty": 0.0})
-        a["payout"] += amount
-        if "платёж покупател" in s or "платеж покупател" in s:
-            a["buyer_pay"] += amount
-            a["qty"] += qty
-        elif "возврат платеж" in s:
-            a["returns"] += amount               # реальный возврат денег покупателю
-            a["ret_qty"] += qty if qty else 1    # кол-во возвращённых штук
-        elif "оплата услуг" in s or "удержан" in s:
-            a["services"] += amount              # комиссия + буст + логистика + хранение
-        elif "балл" in s:
-            a["points"] += amount                # баллы-компенсация (+); возврат баллов (−)
-        elif "скидк" in s:
-            a["promo"] += amount                 # скидка за участие в акциях (−); возврат (+)
-        else:
-            a["other"] += amount                 # на всякий случай — не должно быть
-            unknown_sources[s] = unknown_sources.get(s, 0.0) + amount
-
-    need = max(col.values())
-    for row in ws.iter_rows(min_row=3, values_only=True):
-        if len(row) <= need:
-            continue
-        sku = row[col["sku"]]
-        if not sku:
-            continue
-        model = (row[col["model"]] or "").upper()
-        qty = float(row[col["qty"]] or 0)
-        amount = float(row[col["amount"]] or 0)
-        source = (row[col["source"]] or "")
-        key = (sku, model)
-        s = source.lower()
-        try:
-            txn_date = datetime.strptime(str(row[col["date"]]).strip(), "%d.%m.%Y %H:%M").date()
-        except (ValueError, TypeError):
-            txn_date = None
-        # Отчёт отбирает строки не только по дате операции: в «сентябрьский» попадают
-        # и операции августа, которые есть и в «августовском». Для помесячной разбивки
-        # это задваивало деньги (сотни операций на стыке месяцев).
-        # strict_window оставляет только операции, датированные внутри окна, — тогда
-        # каждая операция попадает ровно в один месяц.
-        if strict_window and txn_date and not (date_from <= txn_date <= date_to):
-            continue
-        _acc(out, key, amount, qty, s)
-        if out_recent is not None and txn_date and txn_date >= recent_cutoff:
-            _acc(out_recent, key, amount, qty, s)
-
-    # Санити: в реальном отчёте о платежах не может быть движения денег при нулевом
-    # количестве по ВСЕМ парам — так выглядит именно сбитый разбор (штуки считаются
-    # только в ветке «платёж покупателя»). Падаем, чтобы брак не попал в кэш:
-    # квартальный живёт 7 дней, а завершённый месяц — вообще навсегда.
-    if out and sum(a["qty"] for a in out.values()) == 0 \
-            and sum(abs(a["payout"]) for a in out.values()) > 0:
-        raise RuntimeError("разбор отчёта «По платежам» сбит: движение денег есть, "
-                           "а количество нулевое по всем SKU — в кэш не пишем")
-    if unknown_sources:
-        print(f"  ⚠️  нераспознанные источники транзакций (ушли в «Прочее»): "
-              f"{ {k: round(v) for k, v in unknown_sources.items()} }")
-
-    for a in out.values():
-        a["payout"] = round(a["payout"], 2)
-        for k in ("buyer_pay", "returns", "services", "promo", "points", "other"):
-            a[k] = round(a[k], 2)
-    print(f"  Netting ready: {len(out)} (sku,model) pairs")
-    if out_recent is not None:
-        for a in out_recent.values():
-            a["payout"] = round(a["payout"], 2)
-            for k in ("buyer_pay", "returns", "services", "promo", "points", "other"):
-                a[k] = round(a[k], 2)
-        print(f"  Netting recent({recent_days}d): {len(out_recent)} (sku,model) pairs")
-        return out, out_recent
-    return out
+    from .finance_data import download_report, read_netting, summarize
+    records = read_netting(download_report("united-netting", date_from, date_to))
+    result = summarize(records, date_from, date_to)
+    if recent_days is not None:
+        cutoff = max(date_from, date_to - timedelta(days=recent_days - 1))
+        return result, summarize(records, cutoff, date_to)
+    return result

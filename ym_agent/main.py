@@ -36,7 +36,7 @@ def _enable_timestamps():
 
 from .config import REPORT_FOLDER, THRESHOLD_RATIO, EXCLUDED_SKUS
 from .yandex_client import (get_all_offers, fetch_shows_sales, fetch_placement_fee_detail,
-                           get_current_bids, fetch_netting)
+                           get_current_bids)
 from .storefront_parser import get_storefront_skus
 from .fbs_fby_client import (get_orders_by_type, get_stocks, estimate_fby_restock,
                             get_orders_with_fees, get_catalog_prices, get_promo_prices,
@@ -163,99 +163,6 @@ def _build_filtered(build, **kw):
     return build(**{k: _drop_excluded(v, EXCLUDED_SKUS) for k, v in kw.items()})
 
 
-def _get_netting_cached(run_date, date_from, date_to, recent_days=7):
-    """Сверка-выплаты (united-netting) с кэшем на день — чтобы не тянуть тяжёлый
-    отчёт каждый прогон. Кэш в netting_cache.json, валиден на текущую дату.
-    Попутно (без доп. запроса) строится агрегат за последние `recent_days` дней —
-    для колонки «Чистая прибыль ФАКТ ₽/шт за 7д» (в моменте, без сглаживания).
-    Returns: (data, data_recent) — оба {(sku,model): {...}}."""
-    import json, os
-    path = os.path.join(DATA_DIR, "netting_cache.json")
-    today = run_date.isoformat()
-    stale = None   # прошлый кэш — фолбэк, если перезапрос упадёт
-    cached_on = None
-    if os.path.exists(path):
-        try:
-            c = json.load(open(path, encoding="utf-8"))
-            if "data_recent" in c:
-                stale = ({tuple(k.split("||")): v for k, v in c["data"].items()},
-                         {tuple(k.split("||")): v for k, v in c["data_recent"].items()})
-            if (c.get("date") == today and c.get("to") == date_to.isoformat()
-                    and c.get("recent_days") == recent_days and stale):
-                DATA_HEALTH["netting"] = "свежие"
-                return stale
-            cached_on = c.get("date")
-        except Exception:
-            pass
-    try:
-        data, data_recent = fetch_netting(date_from, date_to, recent_days=recent_days,
-                                          strict_window=True)
-    except Exception as e:
-        # Не роняем весь лист сверки — берём прошлый кэш, если есть.
-        if stale:
-            age = (run_date - date.fromisoformat(cached_on)).days if cached_on else "?"
-            print(f"   отчёт по платежам недоступен ({e}); берём прошлый кэш ({len(stale[0])} пар)")
-            DATA_HEALTH["netting"] = f"⚠️ из кэша от {cached_on} ({age} дн. назад) — свежий не загрузился"
-            return stale
-        print(f"   отчёт по платежам недоступен ({e}); сверка будет пустой")
-        DATA_HEALTH["netting"] = "❌ НЕТ ДАННЫХ (отчёт по платежам недоступен)"
-        return {}, {}
-    DATA_HEALTH["netting"] = "свежие"
-    try:
-        json.dump({"date": today, "from": date_from.isoformat(), "to": date_to.isoformat(),
-                   "recent_days": recent_days,
-                   "data": {f"{k[0]}||{k[1]}": v for k, v in data.items()},
-                   "data_recent": {f"{k[0]}||{k[1]}": v for k, v in data_recent.items()}},
-                  open(path, "w", encoding="utf-8"), ensure_ascii=False)
-    except Exception:
-        pass
-    return data, data_recent
-
-
-def _get_netting_quarter_cached(run_date, date_from, date_to, valid_days=7):
-    """Квартальный united-netting с кэшем на 7 дней (netting_quarter_cache.json).
-    Квартал меняется медленно → не тянем тяжёлый 90-дневный отчёт каждый день.
-    Returns: {(sku,model): {...}}."""
-    import json, os
-    from datetime import date as _date
-    path = os.path.join(DATA_DIR, "netting_quarter_cache.json")
-    stale = None   # прошлый кэш — фолбэк, если перезапрос упадёт
-    if os.path.exists(path):
-        try:
-            c = json.load(open(path, encoding="utf-8"))
-            stale = {tuple(k.split("||")): v for k, v in c.get("data", {}).items()}
-            cached_on = _date.fromisoformat(c.get("date", "2000-01-01"))
-            # Валидность — ТОЛЬКО по возрасту (не привязываемся к точному `to`:
-            # `to`=вчера меняется каждый день и раньше сбрасывал кэш ежедневно).
-            # Квартальная маржа стабильна → освежаем раз в valid_days.
-            if (run_date - cached_on).days < valid_days and stale:
-                DATA_HEALTH["netting90"] = (f"из кэша от {cached_on.isoformat()} "
-                                            f"({(run_date - cached_on).days} дн., обновляется раз в {valid_days})")
-                return stale
-        except Exception:
-            pass
-    try:
-        data = fetch_netting(date_from, date_to, strict_window=True)
-    except Exception as e:
-        # Не роняем строки «Σ 90д» — берём прошлый кэш, если он есть.
-        if stale:
-            print(f"   квартальный нетинг недоступен ({e}); берём прошлый кэш ({len(stale)} пар)")
-            DATA_HEALTH["netting90"] = "⚠️ из просроченного кэша — свежий не загрузился"
-            return stale
-        print(f"   квартальный нетинг недоступен ({e}); квартальные строки будут пустыми")
-        DATA_HEALTH["netting90"] = "❌ НЕТ ДАННЫХ"
-        return {}
-    DATA_HEALTH["netting90"] = "свежие"
-    try:
-        json.dump({"date": run_date.isoformat(), "from": date_from.isoformat(),
-                   "to": date_to.isoformat(),
-                   "data": {f"{k[0]}||{k[1]}": v for k, v in data.items()}},
-                  open(path, "w", encoding="utf-8"), ensure_ascii=False)
-    except Exception:
-        pass
-    return data
-
-
 def _record_daily_promos(run_date, promo_prices: dict, write: bool = True):
     """Пишет дневной снимок участия в акциях в promo_daily.json и возвращает всю
     накопленную историю. У Яндекса истории участия в API НЕТ (отдаёт только текущее
@@ -309,69 +216,6 @@ def _record_daily_promos(run_date, promo_prices: dict, write: bool = True):
     except Exception:
         pass
     return store["days"], store["meta"]
-
-
-MONTHS_START = date(2026, 5, 1)  # первый месяц с надёжными данными netting
-
-
-def _get_months_netting_cached(run_date):
-    """Помесячный united-netting (сырой агрегат, БЕЗ расчёта прибыли — прибыль
-    считается в report_generator, как для Σ 90д). Кэш в netting_months_cache.json:
-    завершённые месяцы кэшируются НАВСЕГДА (не меняются задним числом), текущий
-    (неполный) месяц тянется заново каждый прогон, пока не закроется.
-    Returns: {"YYYY-MM": {(sku,model): {payout,buyer_pay,returns,services,promo,points,other,qty,ret_qty}}}."""
-    import json, os, calendar
-    path = os.path.join(DATA_DIR, "netting_months_cache.json")
-    cache = {}
-    if os.path.exists(path):
-        try:
-            cache = json.load(open(path, encoding="utf-8"))
-        except Exception:
-            cache = {}
-
-    months = []
-    m = MONTHS_START
-    cur_month_start = run_date.replace(day=1)
-    while m <= cur_month_start:
-        months.append(m)
-        y, mo = (m.year, m.month + 1) if m.month < 12 else (m.year + 1, 1)
-        m = date(y, mo, 1)
-
-    result = {}
-    for month_start in months:
-        key = month_start.strftime("%Y-%m")
-        is_current = (month_start == cur_month_start)
-        if not is_current and key in cache:
-            result[key] = {tuple(k.split("||")): v for k, v in cache[key].items()}
-            continue
-        last_day = calendar.monthrange(month_start.year, month_start.month)[1]
-        month_end = date(month_start.year, month_start.month, last_day)
-        fetch_to = min(month_end, run_date - timedelta(days=1))
-        if fetch_to < month_start:
-            continue  # месяц ещё не начался
-        # Ключ, под которым лежит запасной снимок: у закрытого месяца это он сам,
-        # у текущего — отдельный «__partial». Разделение принципиально: неполный
-        # снимок текущего месяца, попав под обычный ключ, был бы 1-го числа принят
-        # за готовый закрытый месяц и застрял бы там навсегда.
-        fb_key = key if not is_current else f"{key}__partial"
-        try:
-            data = fetch_netting(month_start, fetch_to, strict_window=True)
-        except Exception as e:
-            print(f"   месяц {key} недоступен ({e}); берём прошлый снимок"
-                  if fb_key in cache else f"   месяц {key} недоступен ({e}); пропускаем")
-            if fb_key in cache:
-                result[key] = {tuple(k.split("||")): v for k, v in cache[fb_key].items()}
-            continue
-        result[key] = data
-        cache[fb_key] = {f"{k[0]}||{k[1]}": v for k, v in data.items()}
-        if not is_current:
-            cache.pop(f"{key}__partial", None)   # месяц закрылся — черновик не нужен
-
-    try:
-        json.dump(cache, open(path, "w", encoding="utf-8"), ensure_ascii=False)
-    except Exception:
-        pass
-    return result
 
 
 def _record_fby_stock(run_date, stocks):
@@ -719,25 +563,26 @@ def run(run_date: date):
     boost_bids_prev, boost_bids_history = _record_daily_bids(run_date, api_bids_today)
     print(f"   API-ставок сегодня: {len(api_bids_today)}; вчера было: {len(boost_bids_prev)}")
 
-    # 6d. Сверка с Яндексом — реальные выплаты по артикулам (united-netting),
-    #     trailing 30 дней, кэш на день. Источник истины «что Яндекс перевёл».
-    netting_from = run_date - timedelta(days=30)
-    print(f"\n6d. Сверка выплат (united-netting) за {netting_from} → {yesterday}...")
-    netting, netting_recent = _get_netting_cached(run_date, netting_from, yesterday, recent_days=7)
-    print(f"   Пар (SKU, модель) в выплатах: {len(netting)} (за 7д: {len(netting_recent)})")
-
-    # 6e. Квартальная сверка (90 дней) — устойчивая маржа без дневных скачков от
-    #     смещения выплат. Кэш на 7 дней (квартал меняется медленно, не тянем ежедневно).
-    netting_q_from = run_date - timedelta(days=90)
-    print(f"6e. Квартальная сверка (90д) за {netting_q_from} → {yesterday}...")
-    netting_quarter = _get_netting_quarter_cached(run_date, netting_q_from, yesterday)
-    print(f"   Пар (SKU, модель) за квартал: {len(netting_quarter)}")
-
-    # 6f. Помесячная сверка — сырой агрегат по месяцам (завершённые месяцы кэшируются
-    # навсегда), профит считает report_generator (та же формула, что и Σ90д).
-    print("6f. Помесячная сверка (netting по месяцам)...")
-    netting_months = _get_months_netting_cached(run_date)
-    print(f"   Месяцев в разбивке: {len(netting_months)} ({', '.join(sorted(netting_months))})")
+    # Corrected financial pipeline. Old aggregated caches have no statuses and
+    # cannot be migrated reliably; v2 retains source records and source files.
+    from .finance_data import get_netting_records
+    from .order_economics import get_order_records
+    finance_from = run_date - timedelta(days=89)
+    finance_records, finance_orders = [], []
+    finance_health = []
+    try:
+        finance_records = get_netting_records(run_date, finance_from, yesterday)
+        finance_health.append("платежи свежие")
+    except Exception as e:
+        finance_health.append("НЕТ данных платежей: " + type(e).__name__)
+    try:
+        finance_orders = get_order_records(run_date, finance_from, yesterday)
+        finance_health.append("заказы свежие")
+    except Exception as e:
+        finance_health.append("НЕТ данных заказов: " + type(e).__name__)
+    finance_health = "; ".join(finance_health)
+    DATA_HEALTH["netting"] = finance_health
+    print("   Финансы:", finance_health)
 
     # API-ставки (если заданы per-SKU) важнее ручного снимка кабинета.
     for sku, bid in api_bids_today.items():
@@ -780,15 +625,11 @@ def run(run_date: date):
         boost_bids_date=boost_bids_date,
         boost_bids_prev=boost_bids_prev,
         boost_bids_history=boost_bids_history,
-        netting=netting,
-        netting_from=netting_from,
-        netting_to=yesterday,
-        netting_recent=netting_recent,
-        netting_recent_days=7,
-        netting_quarter=netting_quarter,
-        netting_quarter_from=netting_q_from,
-        netting_quarter_to=yesterday,
-        netting_months=netting_months,
+        finance_records=finance_records,
+        finance_orders=finance_orders,
+        finance_from=finance_from,
+        finance_to=yesterday,
+        finance_health=finance_health,
         promo_history=promo_history,
         promo_meta=promo_meta,
     )
