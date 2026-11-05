@@ -8,6 +8,7 @@ Excel report. Основные листы:
   Юнит-экономика, Скидки FEE, Видимость↔Буст↔Показы, Акции vs Без акций, Остатки и др.
 """
 
+from .config import DATA_DIR
 import os
 from .boost_metrics import estimate as boost_estimate, percentage as boost_percentage, weighted_share
 import statistics
@@ -2947,7 +2948,7 @@ def build_report(
     # ПОРЯДОК ЛИСТОВ
     # ══════════════════════════════════════════════════════════════════════════
     desired_order = [
-        "Дашборд", "Скидки FEE по заказам", "Сверка выплат", "Экономика заказов", "Деньги по месяцам",
+        "Дашборд", "Плюс-минус по товарам", "Скидки FEE по заказам", "Сверка выплат", "Экономика заказов", "Деньги по месяцам",
         "Юнит-экономика",
         # Листы динамики идут в порядке ВОРОНКИ: показы → клики → CTR →
         # корзины → клик/корзина → покупки → клик/покупка.
@@ -2964,6 +2965,13 @@ def build_report(
                         if name not in desired_order and name not in trailing_order]
     ordered_sheets += [wb[name] for name in trailing_order if name in wb.sheetnames]
     wb._sheets = ordered_sheets
+
+    # Main decision view and separately reconciled closed periods.
+    from .economics_view import add_economics_view
+    add_economics_view(wb, kwargs.get("finance_orders", []),
+                       kwargs.get("finance_records", []),
+                       kwargs.get("finance_from"), kwargs.get("finance_to"),
+                       os.path.join(DATA_DIR, "closed_periods"))
 
     # ══════════════════════════════════════════════════════════════════════════
     # SAVE

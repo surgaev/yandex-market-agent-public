@@ -90,7 +90,7 @@ def add_settlement_sheet(wb, records, date_from, date_to, health):
     ws.auto_filter.ref=f'A2:N{max(2,ws.max_row-1)}'
     return ws
 
-def add_monthly_money(wb, records, date_from, date_to):
+def add_monthly_money(wb, records, date_from, date_to, orders=None, cash_records=None):
     """SKU/month matrix in the former monthly-profit report's visual style."""
     name = 'Деньги по месяцам'
     index = wb.sheetnames.index(name) if name in wb.sheetnames else len(wb.sheetnames)
@@ -98,7 +98,7 @@ def add_monthly_money(wb, records, date_from, date_to):
     ws = wb.create_sheet(name, index)
     ws.sheet_properties.tabColor = '8E44AD'
     ws.sheet_view.showGridLines = False
-    selected = [r for r in records if str(date_from) <= r['date'] <= str(date_to)]
+    selected = [r for r in (records if cash_records is None else cash_records) if str(date_from) <= r['date'] <= str(date_to)]
     months = sorted({r['date'][:7] for r in selected})
     amounts = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
     names = {}
@@ -108,11 +108,18 @@ def add_monthly_money(wb, records, date_from, date_to):
                 names[row[1]] = row[0]
     for r in selected:
         amounts[r['sku']][r['date'][:7]][r['ledger']] += r['amount']
-    width = 2 + 7 * (len(months)+1)
+    from .sku_diagnostics import summarize_skus
+    order_stats={}
+    for month in months:
+        cohort=[r for r in (orders or []) if r['created'][:7]==month]
+        order_stats[month]=summarize_skus(cohort,records,date_from,date_to)
+    order_stats['ИТОГО ЗА ПЕРИОД']=summarize_skus(orders or [],records,date_from,date_to)
+    month_headers=[HEADERS[0],'Рассчитано доставок, шт.','Вклад заказов, ₽/шт.']+HEADERS[1:]
+    width = 2 + 9 * (len(months)+1)
     ws.merge_cells(start_row=1,start_column=1,end_row=1,end_column=width)
     ws['A1'] = (f'ДЕНЬГИ ПО МЕСЯЦАМ · {date_from}–{date_to}. Операции по SKU, FBS + FBY, по дате транзакции. '
         'Это движение денег, не прибыль. Граничные месяцы неполные. '
-        'В каждом месяце: проведено / в отправке / ожидается. Баллы, исключённые и неизвестные статусы — '
+        'Штуки — рассчитанные доставленные товары по месяцу оформления заказа; вклад/шт. включает закуп, налог 7%, баллы и известный вклад отмен/невыкупов. Незавершённые позиции исключены. Это предварительная экономика заказов, не выплата/шт. В каждом месяце рядом: проведено / в отправке / ожидается. Баллы и прочие статусы — '
         'в свёрнутых колонках (раскройте «+» сверху). Пусто — операций нет; 0 — нулевое сальдо. '
         'Сортировка по проведённым деньгам за весь период ↓.')
     ws['A1'].font = Font(name='Arial',size=10,color='555555')
@@ -121,22 +128,22 @@ def add_monthly_money(wb, records, date_from, date_to):
     # Keep the note readable in the first visible screen instead of across the full matrix.
     ws.unmerge_cells(start_row=1,start_column=1,end_row=1,end_column=width)
     ws.merge_cells('A1:P1')
-    tints = ['FDF3E2','E8F1F8','EDE7F6','F2EDF8','F2EDF8','EEEEEE','FFF2CC']
+    tints = ['FDF3E2','E7EFF7','E3F0E6','E8F1F8','EDE7F6','F2EDF8','F2EDF8','EEEEEE','FFF2CC']
     line = Side(style='thin',color='DDDDDD')
     for c,label in [(1,'Товар'),(2,'SKU')]:
         ws.cell(2,c,label); ws.merge_cells(start_row=2,start_column=c,end_row=3,end_column=c)
     groups = months + ['ИТОГО ЗА ПЕРИОД']
     for i,m in enumerate(groups):
-        base = 3 + 7*i
+        base = 3 + 9*i
         title = m
         if i<len(months) and (m==str(date_from)[:7] or m==str(date_to)[:7]):
             title += ' · в пределах окна'
         ws.cell(2,base,title)
-        ws.merge_cells(start_row=2,start_column=base,end_row=2,end_column=base+6)
-        for j,h in enumerate(HEADERS):
+        ws.merge_cells(start_row=2,start_column=base,end_row=2,end_column=base+8)
+        for j,h in enumerate(month_headers):
             ws.cell(3,base+j,h)
-            ws.column_dimensions[get_column_letter(base+j)].width = 15
-        ws.column_dimensions.group(get_column_letter(base+3),get_column_letter(base+6),hidden=True)
+            ws.column_dimensions[get_column_letter(base+j)].width = 12
+        ws.column_dimensions.group(get_column_letter(base+5),get_column_letter(base+8),hidden=True)
     for row in ws.iter_rows(min_row=2,max_row=3,max_col=width):
         for c in row:
             c.fill = PatternFill('solid',fgColor='8E44AD')
@@ -144,10 +151,11 @@ def add_monthly_money(wb, records, date_from, date_to):
             c.alignment = Alignment(horizontal='center',vertical='center',wrap_text=True)
     for i in range(len(groups)):
         for j,tint in enumerate(tints):
-            c=ws.cell(3,3+7*i+j)
+            c=ws.cell(3,3+9*i+j)
             c.fill=PatternFill('solid',fgColor=tint)
             c.font=Font(name='Arial',size=10,bold=True,color='333333')
-    ws.row_dimensions[2].height=24; ws.row_dimensions[3].height=32
+    for i in range(len(groups)):ws.cell(2,3+9*i).alignment=Alignment(horizontal='left',vertical='center')
+    ws.row_dimensions[2].height=24; ws.row_dimensions[3].height=42
     skus=sorted(amounts,key=lambda sku:(-sum(v['cash_done'] for v in amounts[sku].values()),sku))
     for ri,sku in enumerate(skus,4):
         ws.cell(ri,1,names.get(sku,sku)[:50]);ws.cell(ri,2,sku)
@@ -155,11 +163,19 @@ def add_monthly_money(wb, records, date_from, date_to):
             values=amounts[sku].get(m) if i<len(months) else {
                 k:sum(v[k] for v in amounts[sku].values()) for k in LEDGERS}
             for j,k in enumerate(LEDGERS):
-                if values is not None: ws.cell(ri,3+7*i+j,round(values[k],2))
+                if values is not None: ws.cell(ri,3+9*i+(j if j==0 else j+2),round(values[k],2))
+            stats=order_stats[m].get(sku,{})
+            qty=stats.get('qty',0)
+            ws.cell(ri,4+9*i,qty)
+            if qty:ws.cell(ri,5+9*i,round(stats.get('adjusted',0)/qty,2))
     total_row=4+len(skus)
     ws.cell(total_row,1,'ИТОГО' if selected else 'НЕТ ДАННЫХ')
     for c in range(3,width+1):
         if selected: ws.cell(total_row,c,round(sum(ws.cell(r,c).value or 0 for r in range(4,total_row)),2))
+    for i,m in enumerate(groups):
+        stats=order_stats[m];qty=sum(stats.get(sku,{}).get('qty',0) for sku in skus);profit=sum(stats.get(sku,{}).get('adjusted',0) for sku in skus if stats.get(sku,{}).get('qty',0)>0)
+        ws.cell(total_row,4+9*i,qty)
+        ws.cell(total_row,5+9*i,round(profit/qty,2) if qty else None)
     for row in ws.iter_rows(min_row=4,max_row=total_row,max_col=width):
         for c in row:
             total=c.row==total_row
@@ -169,13 +185,21 @@ def add_monthly_money(wb, records, date_from, date_to):
             if isinstance(c.value,(float,int)):
                 c.number_format='#,##0.00;[Red]-#,##0.00;"—"'
                 color='1B5E20' if c.value>0 else 'B71C1C' if c.value<0 else '999999'
-            c.font=Font(name='Arial',size=10,bold=total or c.column>=3+7*len(months),color=color)
+            c.font=Font(name='Arial',size=10,bold=total or c.column>=3+9*len(months),color=color)
             if total: c.fill=PatternFill('solid',fgColor='EEEEEE')
-            elif c.column>=3: c.fill=PatternFill('solid',fgColor=tints[(c.column-3)%7])
+            elif c.column>=3: c.fill=PatternFill('solid',fgColor=tints[(c.column-3)%9])
         ws.row_dimensions[row[0].row].height=22
-    ws.column_dimensions['A'].width=40;ws.column_dimensions['B'].width=16
+    ws.column_dimensions['A'].width=28;ws.column_dimensions['B'].width=15
+    for i in range(len(groups)):
+        for ri in range(4,total_row+1):ws.cell(ri,4+9*i).number_format='0'
+    # Preserve product labels from either the former or the unified economics layout.
+    if 'Юнит-экономика' in wb.sheetnames:
+        for row in wb['Юнит-экономика'].values:
+            if len(row)>1 and row[0] in amounts and isinstance(row[1],str):names[row[0]]=row[1]
+        for ri,sku in enumerate(skus,4):ws.cell(ri,1,names.get(sku,sku)[:50])
     ws.freeze_panes='C4'
     ws.auto_filter.ref=f'A3:{get_column_letter(width)}{max(3,total_row-1)}'
+    hide_empty_payment_columns(ws)
     return ws
 
 def table(wb, name, note, headers, rows, money_start=3):
@@ -213,7 +237,7 @@ def add_finance_sheets(wb, records, orders, date_from, date_to, health):
         'оплата и услуги одного заказа могут относиться к разным периодам. Отсутствие продаж не обнуляет расходы.')
     add_settlement_sheet(wb,records,date_from,date_to,health)
     selected = [r for r in records if str(date_from)<=r['date']<=str(date_to)]
-    add_monthly_money(wb, records, date_from, date_to)
+    add_monthly_money(wb, records, date_from, date_to, orders)
     table(wb,'Финансовые операции',
         'Исходные операции после нормализации. Проверяйте статус, заказ и дату; справочные и отменённые записи сохранены для сверки.',
         ['SKU','Модель','Дата','Заказ','Источник','Услуга / товар','Статус','Учёт','Сумма, ₽'],
@@ -222,3 +246,24 @@ def add_finance_sheets(wb, records, orders, date_from, date_to, health):
     for col in ['E','F','G']: ws.column_dimensions[col].width=45
     from .order_economics import add_order_economics
     add_order_economics(wb, orders, health)
+    from .sku_diagnostics import add_sku_diagnostics
+    add_sku_diagnostics(wb, orders, records, date_from, date_to)
+
+
+def hide_empty_payment_columns(ws):
+    """Hide only empty shipment/pending columns, independently for every month."""
+    for cell in ws[3]:
+        if cell.value not in ('В отправке, ₽','Ожидается, ₽'):
+            continue
+        has_amount=any(isinstance(ws.cell(r,cell.column).value,(int,float))
+                       and abs(ws.cell(r,cell.column).value)>1e-9
+                       for r in range(4,ws.max_row))
+        ws.column_dimensions[get_column_letter(cell.column)].hidden=not has_amount
+
+    # Month headings span the visible metrics, avoiding hidden ledger columns.
+    for merged in list(ws.merged_cells.ranges):
+        if merged.min_row==merged.max_row==2 and merged.min_col>=3:
+            start=merged.min_col
+            visible=[col for col in range(start,start+5) if not ws.column_dimensions[get_column_letter(col)].hidden]
+            ws.unmerge_cells(str(merged))
+            ws.merge_cells(start_row=2,start_column=start,end_row=2,end_column=max(visible))

@@ -18,3 +18,8 @@ __pycache__/
 # артефакты сборки пакета
 build/
 *.egg-info/
+
+# Финансовые выгрузки и локальные закрытые периоды
+finance_cache_v2/
+/closed_periods/
+*.xlsx
