@@ -106,6 +106,8 @@ def add_recent_economics(wb,orders,records,date_from,date_to,meta,prices):
       'Σ = сумма вкладов / сумма штук, а не среднее двух каналов. Не суммируйте Σ и строки FBS/FBY. Сверка выплат — деньги по датам проводок; закрытый сентябрь показан отдельно.',
     ]
     for i,note in enumerate(notes,last+3):ws.merge_cells(start_row=i,start_column=1,end_row=i,end_column=14);ws.cell(i,1,note);ws.cell(i,1).alignment=Alignment(wrap_text=True,vertical='center');ws.row_dimensions[i].height=38
+    from .profit_drivers import add_profit_drivers
+    add_profit_drivers(wb,orders,records,date_from,date_to)
     return ws
 
 

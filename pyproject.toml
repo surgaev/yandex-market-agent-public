@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "ym-agent"
-version = "0.3.0"
+version = "0.3.1"
 description = "Аналитика продавца Яндекс Маркета: экономика заказов, сверка выплат, буст, остатки FBS/FBY → Excel-отчёт"
 readme = "README.md"
 license = "MIT"
