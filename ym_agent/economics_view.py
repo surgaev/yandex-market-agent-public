@@ -91,7 +91,9 @@ def add_economics_view(wb, orders, records, date_from, date_to, closed_dir=None)
             _add_closed(wb,path)
     from .recent_economics import add_recent_economics
     ws=add_recent_economics(wb,orders,records,date_from,date_to,meta,prices)
-    fronts=['Дашборд','Юнит-экономика']+[s.title for s in wb if s.title.startswith('Сентябрь 2026')]
+    from .price_targets_returns import add_price_targets_returns
+    add_price_targets_returns(wb,orders,records,date_from,date_to,meta,prices)
+    fronts=['Дашборд','Юнит-экономика','Цены по товарам']+[s.title for s in wb if s.title.startswith('Сентябрь 2026')]
     helpers=['Сверка выплат','Сентябрь — итог','Экономика заказов','Финансовые операции','Модель по комиссиям','Плюс-минус по товарам','Сентябрь — продажи','Сентябрь — услуги']
     wb._sheets=[wb[n] for n in fronts if n in wb.sheetnames]+[s for s in wb if s.title not in fronts+helpers]+[wb[n] for n in helpers if n in wb.sheetnames]
     return ws

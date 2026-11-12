@@ -40,29 +40,31 @@ def _headers():
 _NET_ERRORS = (requests.exceptions.ConnectionError, requests.exceptions.Timeout)
 
 
-def _request_raw_with_retry(method, url, *, retries=5, timeout=60, **kwargs):
+def _request_raw_with_retry(method, url, *, retries=5, timeout=60, extra_delays=(), **kwargs):
     """requests.request с ретраем сетевых сбоев (DNS/connection/timeout).
     Возвращает «сырой» Response — без raise_for_status, чтобы вызывающий
     код мог сам обработать спец-статусы (напр. 420 rate limit)."""
-    for attempt in range(retries):
+    delays = tuple(10 * n for n in range(1, retries)) + extra_delays
+    attempts = len(delays) + 1
+    for attempt in range(attempts):
         try:
             r = requests.request(method, url, timeout=timeout, **kwargs)
         except _NET_ERRORS as e:
-            if attempt == retries - 1:
+            if attempt == attempts - 1:
                 raise
-            wait = 10 * (attempt + 1)
+            wait = delays[attempt]
             print(f"  сетевой сбой на {url} ({type(e).__name__}), "
-                  f"повтор через {wait}s ({attempt+1}/{retries})...")
+                  f"повтор через {wait}s ({attempt+1}/{attempts})...")
             time.sleep(wait)
             continue
         # 5xx — сбой на стороне Яндекса, почти всегда кратковременный. Раньше он
         # не ретраился и одна случайная 500 на первом же /offer-cards роняла весь
         # прогон (20.08.2026 отчёт не собрался именно так). 4xx НЕ ретраим —
         # это наши ошибки (401/400), сами не пройдут.
-        if r.status_code >= 500 and attempt < retries - 1:
-            wait = 10 * (attempt + 1)
+        if r.status_code >= 500 and attempt < attempts - 1:
+            wait = delays[attempt]
             print(f"  {r.status_code} от сервера на {url}, "
-                  f"повтор через {wait}s ({attempt+1}/{retries})...")
+                  f"повтор через {wait}s ({attempt+1}/{attempts})...")
             time.sleep(wait)
             continue
         return r
@@ -96,7 +98,12 @@ def get_all_offers() -> list[dict]:
     seen_tokens = set()
     while True:
         params = {"pageToken": page_token} if page_token else {}
-        data = _post(f"/businesses/{BUSINESS_ID}/offer-cards", {}, params=params)
+        # Каталог нужен для старта отчёта. После коротких повторов даём
+        # API восстановиться и запрашиваем ту же страницу по тому же токену.
+        data = _request_with_retry(
+            "POST", f"/businesses/{BUSINESS_ID}/offer-cards", json={},
+            params=params, extra_delays=(15 * 60, 30 * 60),
+        )
         for o in data.get("result", {}).get("offerCards", []):
             mapping = o.get("mapping", {})
             offers.append({
