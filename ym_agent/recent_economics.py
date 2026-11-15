@@ -108,6 +108,7 @@ def add_recent_economics(wb,orders,records,date_from,date_to,meta,prices):
     for i,note in enumerate(notes,last+3):ws.merge_cells(start_row=i,start_column=1,end_row=i,end_column=14);ws.cell(i,1,note);ws.cell(i,1).alignment=Alignment(wrap_text=True,vertical='center');ws.row_dimensions[i].height=38
     from .profit_drivers import add_profit_drivers
     add_profit_drivers(wb,orders,records,date_from,date_to)
+    add_cash_check(ws, orders, records, windows["recent"][0], end, last)
     return ws
 
 
@@ -140,3 +141,72 @@ def style_profit_view(ws,last=None):
     for expr,fill,color in [('AND($D6>0,ISNUMBER(G6),G6<0)',red,'A61C1C'),('AND($D6>0,ISNUMBER(G6),G6>=0)',green,'1B5E20')]:
         ws.conditional_formatting.add(f'G6:G{last}',FormulaRule(formula=[expr],fill=fill,font=Font(color=color),stopIfTrue=True))
     ws.conditional_formatting.add(f'A6:AI{last}',FormulaRule(formula=['$D6>0'],fill=active))
+
+
+def add_cash_check(ws, orders, records, start, end, last):
+    """Explain differences between accrued and posted cash for the deliveries in E."""
+    from collections import Counter
+    from copy import copy
+    postings = defaultdict(list)
+    for entry in records:
+        if entry['date'] <= str(end):
+            postings[entry['sku'], entry['model'], entry['order']].append(entry)
+    checks = defaultdict(Counter)
+    for order in orders:
+        if not str(start) <= order['created'] <= str(end):
+            continue
+        if order['status'] != 'Доставлен покупателю' or order['after_reserve'] is None:
+            continue
+        sku, model = order['sku'], order['model']
+        entries = postings[sku, model, order['order']]
+        cash = [e for e in entries if e['ledger'] in ('cash_done', 'cash_pending', 'cash_sent')]
+        amount = sum(e['amount'] for e in cash)
+        posted = sum(e['amount'] for e in cash if e['ledger'] == 'cash_done')
+        posted_fees = -sum(e['amount'] for e in cash if e['source'] == 'Оплата услуг Маркета')
+        fees = order['fees'] or 0
+        income = (order['buyer'] or 0) + (order['other'] or 0)
+        accrued = income - fees
+        bonus = sum(e['amount'] for e in entries if e['ledger'] == 'bonus_done')
+        profit = order['after_reserve'] + bonus
+        stats = Counter(qty=order['qty'], profit=profit)
+        if not cash:
+            stats.update(missing=1, missing_qty=order['qty'], missing_profit=profit)
+        elif abs(income - (amount + posted_fees)) < .015 and fees - posted_fees > .015:
+            stats.update(fee_count=1, fees=fees-posted_fees)
+        elif abs(accrued-amount) >= .015:
+            stats.update(other=1, gap=accrued-amount)
+        elif abs(accrued-posted) >= .015:
+            stats.update(pending=1)
+        else:
+            stats.update(settled=1)
+        for channel in (model, 'Σ'):
+            checks[sku, channel].update(stats)
+    ws['AL5'] = 'Сверка денег и влияние на ₽/шт. · 14 дней'
+    ws['AL5']._style = copy(ws['AK5']._style)
+    ws.column_dimensions['AL'].width = 62
+    def rub(number, signed=False):
+        return format(number, '+.2f' if signed else '.2f').replace('.', ',')
+    for i in range(6, last + 1):
+        a = checks[ws.cell(i, 1).value, ws.cell(i, 3).value]
+        lines = []
+        if a['missing']:
+            lines.append(f"Без денежных проводок: {a['missing']} поз., вклад {rub(a['missing_profit'])} ₽.")
+            remaining = a['qty'] - a['missing_qty']
+            if remaining:
+                without = (a['profit'] - a['missing_profit']) / remaining
+                current = a['profit'] / a['qty']
+                lines.append(f"Без них {rub(without)} ₽/шт., с ними {rub(current)} ₽/шт. Влияние {rub(current-without, True)} ₽/шт.")
+            else:
+                lines.append("Без этих позиций нет рассчитанных штук для сравнения.")
+        if a['fee_count']:
+            lines.append(f"Услуги уже вычтены: {rub(a['fees'])} ₽ по {a['fee_count']} поз. Если удержат столько же, изменение 0 ₽/шт.")
+        if a['other']:
+            lines.append(f"Требует сверки: {a['other']} поз. Начислено минус все денежные проводки {rub(a['gap'], True)} ₽ ({rub(a['gap']/a['qty'], True)} ₽/шт.).")
+        if a['pending']:
+            lines.append(f"Сходится с ожидаемыми платежами: {a['pending']} поз.")
+        if a['settled']:
+            lines.append(f"Деньги проведены и сошлись: {a['settled']} поз.")
+        cell = ws.cell(i, 38, '\n'.join(lines) or 'Нет рассчитанных доставок')
+        cell._style = copy(ws.cell(i, 37)._style)
+        ws.row_dimensions[i].height = max(ws.row_dimensions[i].height or 0, 16*sum((len(line)+49)//50 for line in lines))
+    ws.auto_filter.ref = f'A5:AL{last}'

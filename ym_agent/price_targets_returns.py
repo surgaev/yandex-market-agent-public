@@ -63,28 +63,38 @@ def build_rows(wb,orders,records,date_from,date_to,meta=None,prices=None,raw_pat
 
 def formulas(r):
     # Historical retention incl tax/fees/bonus, fixed cost and known loss allowance.
-    k=f'((Q{r}+P{r})/O{r})'
-    fixed=f'(P{r}+R{r}+S{r}+IF(ISNUMBER(F{r}),F{r},0))'
-    stress=f'({k}-MAX(0,E{r}/100-T{r}/O{r}))'
-    valid=f'AND(ISNUMBER(C{r}),C{r}>0,ISNUMBER(O{r}),O{r}>0,ISNUMBER(Q{r}))'
+    k=f'((S{r}+R{r})/Q{r})'
+    fixed=f'(R{r}+T{r}+U{r}+IF(ISNUMBER(F{r}),F{r},0))'
+    stress=f'({k}-MAX(0,E{r}/100-V{r}/Q{r}))'
+    valid=f'AND(ISNUMBER(C{r}),C{r}>0,ISNUMBER(Q{r}),Q{r}>0,ISNUMBER(S{r}))'
     return [
       f'=IF({valid},{k}*C{r}-{fixed},"н.д.")',
       f'=IF({valid},IF({k}>0,MAX(C{r},ROUNDUP((100+{fixed})/{k}/10,0)*10),"нет решения"),"н.д.")',
-      f'=IF(ISNUMBER(H{r}),H{r}-C{r},"н.д.")',
-      f'=IF(AND({valid},ISNUMBER(E{r}),ISNUMBER(T{r})),IF({stress}>0,MAX(C{r},ROUNDUP((100+{fixed})/{stress}/10,0)*10),"нет решения"),"н.д.")',
       f'=IF(ISNUMBER(J{r}),J{r}-C{r},"н.д.")',
-      f'=IF(ISNUMBER(H{r}),{k}*H{r}-{fixed},"н.д.")',
-      f'=IF(ISNUMBER(J{r}),{stress}*J{r}-{fixed},"н.д.")']
-HEADERS=['SKU','Цвет / товар','Текущая цена, ₽','Доставок базы, шт.','Буст сейчас, %','Допрасходы, ₽/выкуп','Прибыль при текущей цене, модель','Цена для 100 ₽: прежние удержания','Поднять на, ₽','Цена для 100 ₽: буст полностью деньгами','Поднять на, ₽ (буст)','Проверка прибыли: H','Проверка прибыли: J','Ограничения','Средняя цена продаж базы, ₽','Закуп, ₽/шт.','Вклад доставок, ₽/шт.','Потери невыкупов, ₽/шт.','Услуги возвратов, ₽/шт.','Буст в услугах, ₽/шт.','Период заказов базы','Возвратов, поз.','Невыкупов, поз.']
+      f'=IF(AND({valid},ISNUMBER(E{r}),ISNUMBER(V{r})),IF({stress}>0,MAX(C{r},ROUNDUP((100+{fixed})/{stress}/10,0)*10),"нет решения"),"н.д.")',
+      f'=IF(ISNUMBER(L{r}),L{r}-C{r},"н.д.")',
+      f'=IF(ISNUMBER(J{r}),{k}*J{r}-{fixed},"н.д.")',
+      f'=IF(ISNUMBER(L{r}),{stress}*L{r}-{fixed},"н.д.")']
+HEADERS=['SKU','Цвет / товар','Текущая цена, ₽','Доставок базы, шт.','Буст сейчас, %','Допрасходы, ₽/выкуп','Прибыль при текущей цене, модель','Сентябрь 2026 · факт по доставкам, ₽/шт.','Октябрь 2026 · факт по доставкам, ₽/шт.','Цена для 100 ₽: прежние удержания','Поднять на, ₽','Цена для 100 ₽: буст полностью деньгами','Поднять на, ₽ (буст)','Проверка прибыли: J','Проверка прибыли: L','Ограничения','Средняя цена продаж базы, ₽','Закуп, ₽/шт.','Вклад доставок, ₽/шт.','Потери невыкупов, ₽/шт.','Услуги возвратов, ₽/шт.','Буст в услугах, ₽/шт.','Период заказов базы','Возвратов, поз.','Невыкупов, поз.']
 NOTES=[
-'Цель 100 ₽ на выкупленную штуку. Это сценарные цены при сохранении структуры скидок, услуг, налогов и доли возвратов; не гарантия чистой прибыли.',
-'H: прежняя доля поступлений после услуг, налога и баллов; закуп и средние потери возвратов/невыкупов фиксированы. Использована историческая цена продажи из отчёта, а не сегодняшняя цена.',
-'J: дополнительно резерв на полную денежную оплату текущей ставки буста для каждой продажи сверх буста, уже включённого в услуги. Это стресс-сценарий без гарантированной скидки баллами, не ожидаемое списание.',
+'H и I — по месяцу доставки из колонки B закрытого месяца. Пусто — нет сверенной прибыли на выкуп. Цель модели — 100 ₽ на выкупленную штуку. Это сценарные цены при сохранении структуры скидок, услуг, налогов и доли возвратов; не гарантия чистой прибыли.',
+'J: прежняя доля поступлений после услуг, налога и баллов; закуп и средние потери возвратов/невыкупов фиксированы. Использована историческая цена продажи из отчёта, а не сегодняшняя цена.',
+'L: дополнительно резерв на полную денежную оплату текущей ставки буста для каждой продажи сверх буста, уже включённого в услуги. Это стресс-сценарий без гарантированной скидки баллами, не ожидаемое списание.',
 'Закуп, налог 7% и учтённые услуги включены. Неизвестные расходы, будущие удержания и налог на возможную премию не оценены. Возвраты предполагаются годными к перепродаже.',
 'Жёлтая F — дополнительные затраты на выкупленную штуку (упаковка, сборка, накладные). Пусто = не заданы; модель временно использует 0, поэтому нельзя считать результат прибылью после абсолютно всех расходов.',
 'Цена не снижается ниже текущей, округляется вверх до 10 ₽. Цена продажи после скидки продавца может отличаться от прайс-листа; если акция уменьшает её, корректируйте цену/участие отдельно.',
-'Цены в кабинете не меняются. J — стресс-проверка, не рекомендация: экстремальная цена означает необходимость пересмотреть буст/расходы. Н.д. = нет полной базы. Достигнуть 100 ₽ не гарантируется.'
+'Цены в кабинете не меняются. L — стресс-проверка, не рекомендация: экстремальная цена означает необходимость пересмотреть буст/расходы. Н.д. = нет полной базы. Достигнуть 100 ₽ не гарантируется.'
 ]
+
+def monthly_facts(wb, row):
+    for month in ('Сентябрь 2026', 'Октябрь 2026'):
+        if month not in wb or wb[month]['B5'].value != 'По доставке с баллами, ₽/выкуп':
+            yield None
+            continue
+        last = wb[month].max_row
+        lookup = f"INDEX('{month}'!$B$6:$B${last},MATCH($A{row},'{month}'!$A$6:$A${last},0))"
+        yield f'=IFERROR(IF(ISNUMBER({lookup}),{lookup},""),"")'
+
 
 def add_price_targets_returns(wb,orders,records,date_from,date_to,meta=None,prices=None,raw_path=None,bids=None):
     from openpyxl.styles import Font,PatternFill,Alignment
@@ -94,19 +104,23 @@ def add_price_targets_returns(wb,orders,records,date_from,date_to,meta=None,pric
     ws=wb.create_sheet(name,wb.sheetnames.index('Юнит-экономика')+1)
     ws.append(HEADERS);header=ws.max_row
     for row in build_rows(wb,orders,records,date_from,date_to,meta,prices,raw_path,bids):
-        ws.append(row);r=ws.max_row
-        for j,f in enumerate(formulas(r),7):ws.cell(r,j,f)
-        for c in ws[r]:c.font=Font(name='Arial',size=10);c.alignment=Alignment(wrap_text=c.column in [2,14],vertical='center');c.number_format='#,##0.0;[Red](#,##0.0);"—"'
+        ws.append(row[:7] + [None, None] + row[7:])
+        r = ws.max_row
+        model, *targets = formulas(r)
+        ws.cell(r, 7, model)
+        for col, value in enumerate([*monthly_facts(wb, r), *targets], 8):
+            ws.cell(r, col, value)
+        for c in ws[r]:c.font=Font(name='Arial',size=10);c.alignment=Alignment(wrap_text=c.column in [2,16],vertical='center');c.number_format='#,##0.0;[Red](#,##0.0);"—"'
         ws.cell(r,6).fill=PatternFill('solid',fgColor='FFF1CC');ws.cell(r,6).font=Font(color='0000FF');ws.row_dimensions[r].height=80
     for c in ws[header]:c.fill=PatternFill('solid',fgColor='23465A');c.font=Font(bold=True,color='FFFFFF');c.alignment=Alignment(wrap_text=True)
     ws.row_dimensions[header].height=65
-    for i in range(1,24):ws.column_dimensions[get_column_letter(i)].width=20
-    ws.column_dimensions['B'].width=38;ws.column_dimensions['N'].width=60;ws.freeze_panes='C2';ws.auto_filter.ref=f'A1:W{ws.max_row}';ws.sheet_view.showGridLines=False
+    for i in range(1,26):ws.column_dimensions[get_column_letter(i)].width=20
+    ws.column_dimensions['B'].width=38;ws.column_dimensions['P'].width=60;ws.freeze_panes='C2';ws.auto_filter.ref=f'A1:Y{ws.max_row}';ws.sheet_view.showGridLines=False
     from openpyxl.formatting.rule import FormulaRule
     last=ws.max_row
     if last >= 2:
         for condition,fill,color in [('G2>100','DFF0E4','1B5E20'),('AND(G2>=50,G2<=100)','FFF2CC','7D5A00'),('G2<50','FBE3E2','A61C1C')]:
-            ws.conditional_formatting.add(f'G2:G{last}',FormulaRule(formula=[f'AND(ISNUMBER(G2),{condition})'],fill=PatternFill('solid',fgColor=fill),font=Font(color=color)))
+            ws.conditional_formatting.add(f'G2:I{last}',FormulaRule(formula=[f'AND(ISNUMBER(G2),{condition})'],fill=PatternFill('solid',fgColor=fill),font=Font(color=color)))
     for i,note in enumerate(['Цены по товарам с учётом известных потерь возвратов и невыкупов']+NOTES,last+2):
         ws.cell(i,1,note);ws.merge_cells(start_row=i,start_column=1,end_row=i,end_column=14)
         ws.row_dimensions[i].height=33;ws.cell(i,1).alignment=Alignment(wrap_text=True,vertical='center')

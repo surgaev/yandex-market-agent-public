@@ -85,34 +85,54 @@ def add_economics_view(wb, orders, records, date_from, date_to, closed_dir=None)
         for row in cash.iter_rows(min_row=3):
             if row[2].value in ('FBS','FBY'):cash.row_dimensions[row[0].row].hidden=True;cash.row_dimensions[row[0].row].outlineLevel=1
         cash.sheet_properties.outlinePr.summaryBelow=True
+    month_tabs = []
     if closed_dir:
         for path in sorted(Path(closed_dir).glob('*.xlsx')):
             if path.name.startswith('~$'):continue
-            _add_closed(wb,path)
+            title = _add_closed(wb,path)
+            if title:
+                month_tabs.append(title)
     from .recent_economics import add_recent_economics
     ws=add_recent_economics(wb,orders,records,date_from,date_to,meta,prices)
     from .price_targets_returns import add_price_targets_returns
     add_price_targets_returns(wb,orders,records,date_from,date_to,meta,prices)
-    fronts=['Дашборд','Юнит-экономика','Цены по товарам']+[s.title for s in wb if s.title.startswith('Сентябрь 2026')]
+    fronts=['Дашборд','Юнит-экономика','Цены по товарам']+sorted(month_tabs, key=lambda t: (int(t.split()[1]), MONTHS.index(t.split()[0])), reverse=True)
     helpers=['Сверка выплат','Сентябрь — итог','Экономика заказов','Финансовые операции','Модель по комиссиям','Плюс-минус по товарам','Сентябрь — продажи','Сентябрь — услуги']
     wb._sheets=[wb[n] for n in fronts if n in wb.sheetnames]+[s for s in wb if s.title not in fronts+helpers]+[wb[n] for n in helpers if n in wb.sheetnames]
     return ws
 
 
+MONTHS = 'Январь Февраль Март Апрель Май Июнь Июль Август Сентябрь Октябрь Ноябрь Декабрь'.split()
+
+
 def _add_closed(wb,path):
     import openpyxl
     source=openpyxl.load_workbook(path)
-    mapping={'Сентябрь — итог':'Сентябрь — итог','Прибыль по артикулам':'Сентябрь 2026','Реализация — источник':'Сентябрь — продажи','Услуги — источник':'Сентябрь — услуги'}
+    summary = next((name for name in source.sheetnames if name.endswith(' — итог')), None)
+    if not summary:
+        return
+    label = summary.split(' — ')[0]
+    title = str(source[summary]['A2'].value).split(' · ')[0]
+    if label not in MONTHS or title.split()[:1] != [label]:
+        return
+    mapping = {summary: summary, 'Прибыль по артикулам': title,
+               'Реализация — источник': label + ' — продажи', 'Услуги — источник': label + ' — услуги'}
     if not all(n in source.sheetnames for n in mapping):return
     for name,new in mapping.items():
         if new in wb.sheetnames:del wb[new]
         src=source[name];dst=wb.create_sheet(new)
-        for row in src:
+        rows = list(src)
+        if new == title:
+            rows[5:] = sorted(rows[5:], key=lambda row: str(row[0].value).casefold())
+        for dest_row, row in enumerate(rows, 1):
             for cell in row:
                 val=cell.value
                 if cell.data_type=='f':
                     for before,after in mapping.items():val=val.replace("'"+before+"'!","'"+after+"'!")
-                out=dst.cell(cell.row,cell.column,val)
+                if cell.data_type == 'f' and dest_row != cell.row:
+                    from openpyxl.formula.translate import Translator
+                    val = Translator(val, origin=cell.coordinate).translate_formula(row_delta=dest_row-cell.row)
+                out=dst.cell(dest_row,cell.column,val)
                 if cell.has_style:
                     out.font=copy(cell.font);out.fill=copy(cell.fill);out.border=copy(cell.border)
                     out.alignment=copy(cell.alignment);out.number_format=cell.number_format;out.protection=copy(cell.protection)
@@ -121,5 +141,125 @@ def _add_closed(wb,path):
         for key,dim in src.row_dimensions.items():dst.row_dimensions[key]=copy(dim)
         for merged in src.merged_cells.ranges:dst.merge_cells(str(merged))
         dst.freeze_panes=src.freeze_panes;dst.sheet_view.showGridLines=False;dst.conditional_formatting=copy(src.conditional_formatting)
-        if new in ('Сентябрь — продажи','Сентябрь — услуги'):dst.sheet_state='hidden'
-    month=wb['Сентябрь 2026'];month['A1']='Итого за месяц, ₽';month['C1']="='Сентябрь — итог'!B16";month['C1'].number_format='#,##0.00';month['J1']='Сверка итогов →';month['J1'].hyperlink="#'Сентябрь — итог'!A8";month['A2']='СЕНТЯБРЬ 2026 · реализация и услуги по акту';month['A4']='После налога 7%; закуп по справочнику, возвраты пригодны к продаже. Без накладных расходов; компенсации учитываются отдельно.';month.auto_filter.ref=f'A5:N{month.max_row}';month.sheet_properties.tabColor='2F6B48'
+        if name in ('Реализация — источник','Услуги — источник'):dst.sheet_state='hidden'
+    month = wb[title]
+    month['A1'] = 'Итого за месяц, ₽'
+    month['C1'] = f"='{summary}'!B16"
+    month['C1'].number_format = '#,##0.00'
+    month['J1'] = 'Сверка итогов →'
+    month['J1'].hyperlink = f"#'{summary}'!A8"
+    month['A2'] = title.upper() + ' · реализация и услуги по акту'
+    note = 'Без накладных расходов; компенсации учитываются отдельно.' if title == 'Сентябрь 2026' else 'Без накладных расходов.'
+    month['A4'] = 'После налога 7%; закуп по справочнику, возвраты пригодны к продаже. ' + note
+    month.auto_filter.ref = f'A5:N{month.max_row}'
+    month.sheet_properties.tabColor = '2F6B48'
+    bonus_path = path.with_suffix(".bonus.json")
+    if bonus_path.is_file():
+        import json
+        _add_monthly_bonus(month, json.loads(bonus_path.read_text(encoding="utf-8")))
+    delivery_path = path.with_suffix(".delivery.json")
+    if delivery_path.is_file():
+        import json
+        audit_name = label + ' — заказы'
+        if audit_name in wb.sheetnames:
+            del wb[audit_name]
+        _add_delivery_month(wb, month, label, json.loads(delivery_path.read_text(encoding="utf-8")), summary)
+    source.close()
+    return title
+
+
+def _add_monthly_bonus(month, balances):
+    """Add monthly settled bonus turnover, including reversals, to the closed result."""
+    from openpyxl.formatting.rule import CellIsRule
+
+    last = month.max_row
+    # M contains the cost referenced by monthly formulas. Move only the display
+    # column K (return fees) so that J and K can be compared side by side.
+    month.move_range(f'K5:K{last}', cols=4)
+    headers = {
+        'K': 'Прибыль с баллами, ₽/чистую шт.',
+        'P': 'Баллы за скидки, с возвратами, ₽',
+        'Q': 'Оплата услуг баллами, с возвратами, ₽',
+        'R': 'Сальдо баллов, ₽',
+    }
+    for column, title in headers.items():
+        cell = month[f'{column}5']
+        cell._style = copy(month['J5']._style)
+        cell.value = title
+        month.column_dimensions[column].width = 21
+    month.column_dimensions['O'].width = 20
+    for row in range(6, last + 1):
+        sku = month[f'A{row}'].value
+        credit, service = balances[sku]
+        for column, value in {
+            'P': credit, 'Q': service, 'R': f'=P{row}+Q{row}',
+            'K': f'=IF(B{row}>C{row},(I{row}+R{row})/(B{row}-C{row}),"")'
+        }.items():
+            cell = month[f'{column}{row}']
+            cell._style = copy(month[f'J{row}']._style)
+            cell.value = value
+    for op, color in [('lessThan', 'FCE5E5'), ('greaterThanOrEqual', 'E4F2E6')]:
+        month.conditional_formatting.add(f'K6:K{last}', CellIsRule(
+            operator=op, formula=['0'], fill=PatternFill('solid', fgColor=color)))
+    month['A3'] = 'J — результат по акту. K — с сальдо баллов (P:R) по дате проводки за месяц, на выкупленную штуку. Невыкупы и возвраты включены.'
+    month.auto_filter.ref = f'A5:R{last}'
+
+
+def _add_delivery_month(wb, month, label, snapshot, summary):
+    """Group settled transactions by the original delivered order, scheme and SKU."""
+    audit = wb.create_sheet(label + ' — заказы')
+    audit.append(['Артикул', 'Схема', 'Заказ', 'Доставка', 'Доставлено', 'Возвращено',
+                  'По реализации, ₽', 'Оплата, ₽', 'Возврат оплаты, ₽', 'Услуги деньгами, ₽',
+                  'Сальдо баллов, ₽', 'Закуп/шт., ₽', 'Неполные данные (1)', 'Результат, ₽'])
+    for row in snapshot['rows']:
+        audit.append(row)
+        i = audit.max_row
+        audit[f'N{i}'] = (f'=IF(M{i}=1,"",SUM(H{i}:K{i})-(H{i}+I{i})*\'{summary}\'!$B$4'
+                          f'-(E{i}-F{i}*\'{summary}\'!$B$5)*L{i})')
+    audit.freeze_panes = 'D2'
+    audit.auto_filter.ref = audit.dimensions
+    for cell in audit[1]:
+        cell._style = copy(month['A5']._style)
+        audit.column_dimensions[cell.column_letter].width = 21
+    audit.row_dimensions[1].height = 48
+    # Keep the original volume in S, including its use in the calendar-month result.
+    last = month.max_row
+    month.move_range(f'B5:B{last}', cols=17)
+    for i in range(6, last + 1):
+        for col in ('G', 'J', 'K'):
+            cell = month[f'{col}{i}']
+            cell.value = cell.value.replace(f'B{i}', f'S{i}')
+    avg = wb[summary]['B17']
+    avg.value = avg.value.replace(f"'{month.title}'!B6:B", f"'{month.title}'!S6:S")
+    new = {'B':'По доставке с баллами, ₽/выкуп', 'T':'Доставлено, шт.', 'U':'Возвращено по этим заказам, шт.',
+           'V':'Сальдо баллов этих заказов, ₽', 'W':'Прибыль по доставкам, ₽', 'X':'Заказных позиций без сверки'}
+    for col, title in new.items():
+        cell = month[f'{col}5']
+        cell.value, cell._style = title, copy(month['J5']._style)
+        month.column_dimensions[col].width = 22
+    end = audit.max_row
+    prefix = f"'{audit.title}'!"
+    for i in range(6, month.max_row + 1):
+        def total(col):
+            return f'SUMIF({prefix}$A$2:$A${end},A{i},{prefix}${col}$2:${col}${end})'
+        for col, src in [('T','E'),('U','F'),('V','K'),('X','M')]:
+            month[f'{col}{i}'] = '=' + total(src)
+        month[f'W{i}'] = f'=IF(OR(X{i}>0,T{i}=0),"",{total("N")})'
+        month[f'B{i}'] = f'=IF(AND(X{i}=0,T{i}>U{i}),W{i}/(T{i}-U{i}),"")'
+        for col in ('B','V','W'):
+            month[f'{col}{i}']._style = copy(month[f'J{i}']._style)
+    month['S1'] = 'Заказы и проводки →'
+    month['S1'].hyperlink = f"#'{audit.title}'!A1"
+    month['S2'] = 'По доставкам · проводки по ' + snapshot['through']
+    month['S3'] = 'B = результат доставленных заказов после возвратов / выкупленные штуки. При неполной сверке пусто. Невыкупы без доставки и общие расходы вне расчёта.'
+    month.auto_filter.ref = f'A5:X{month.max_row}'
+
+    from openpyxl.formatting.rule import FormulaRule
+    for condition, fill, font in [
+        ('B6<50', 'FBE3E2', 'A61C1C'),
+        ('AND(B6>=50,B6<=100)', 'FFF2CC', '7D5A00'),
+        ('B6>100', 'DFF0E4', '1B5E20'),
+    ]:
+        month.conditional_formatting.add(f'B6:B{last}', FormulaRule(
+            formula=[f'AND(ISNUMBER(B6),{condition})'],
+            fill=PatternFill('solid', fgColor=fill), font=Font(color=font, bold=True)))

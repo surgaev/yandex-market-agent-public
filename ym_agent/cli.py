@@ -74,6 +74,26 @@ def cmd_run(args):
         sys.exit(f"Не заполнено в {ENV_FILE}: {', '.join(missing)}. Сначала: ym-agent init")
     if not os.path.exists(COST_FILE):
         print(f"⚠️  нет {COST_FILE} — себестоимость будет 0, прибыль завышена")
+    if args.wait_for_power and sys.platform == "darwin":
+        import subprocess
+        import time
+        from datetime import datetime
+        scheduled = datetime.now()
+        waited = False
+        while "Battery Power" in subprocess.check_output(["/usr/bin/pmset", "-g", "batt"], text=True).splitlines()[0]:
+            if not waited:
+                print("Ожидаем подключения питания", flush=True)
+            waited = True
+            time.sleep(30)
+        if waited and not args.date:
+            now = datetime.now()
+            next_day = now.date() != scheduled.date()
+            if next_day and (now.hour, now.minute) < (7, 30):
+                return
+            from .config import REPORT_FOLDER
+            report = os.path.join(REPORT_FOLDER, f"ym_report_{now.date()}.xlsx")
+            if (next_day or scheduled.hour < 20) and os.path.isfile(report) and os.path.getsize(report):
+                return
     if args.en0:
         _bind_en0()
     from . import main   # импорт после .env: config читает переменные при загрузке
@@ -87,6 +107,7 @@ def main():
     r = sub.add_parser("run", help="собрать отчёт")
     r.add_argument("--date", help="дата отчёта YYYY-MM-DD (по умолчанию сегодня)")
     r.add_argument("--en0", action="store_true", help="macOS: в обход VPN через Wi-Fi (en0)")
+    r.add_argument("--wait-for-power", action="store_true", help="macOS: дождаться зарядки перед сборкой")
     r.set_defaults(func=cmd_run)
     args = p.parse_args()
     args.func(args)

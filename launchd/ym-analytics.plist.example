@@ -11,6 +11,7 @@
         <!-- путь из `which ym-agent` после `uv tool install …` -->
         <string>/Users/you/.local/bin/ym-agent</string>
         <string>run</string>
+        <string>--wait-for-power</string>
     </array>
 
     <!-- Запуск утром (07:30 МСК) и вечером (20:00 МСК) — часть данных
