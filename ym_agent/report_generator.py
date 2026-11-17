@@ -758,6 +758,7 @@ def build_report(
     # Collect all SKUs that have any activity
     all_skus = sorted(
         set(fbs_stocks.keys()) | set(fby_stocks.keys())
+        | {r["sku"] for r in fby_restock}
         | {sku for day in fbs_orders.values() for sku in day}
         | {sku for day in fby_orders.values() for sku in day}
     )
@@ -781,7 +782,7 @@ def build_report(
         "FBS\nостаток", "FBS\nдоступно",
         f"FBY зак.\n{yesterday.strftime('%d.%m')}", f"FBY зак.\n{day_before.strftime('%d.%m')}",
         "FBY\nостаток", "FBY\nдоступно", "FBY\nкарантин",
-        "FBY ср.\nпродаж/д", "FBY хватит\nна дней",
+        "FBY доставки\nшт./д за 7д", "FBY хватит\nна дней",
         "FBY нужно\nзаказать", "Срочность",
     ]
     for c, h in enumerate(heads4, 1):
@@ -793,13 +794,6 @@ def build_report(
     restock_idx = {r["sku"]: r for r in fby_restock}
 
     for sku in all_skus:
-        # Skip SKUs with zero FBY stock and zero FBY orders yesterday & day before
-        fby_fit = fby_stocks.get(sku, {}).get("fit", 0)
-        fby_ord_y = day_orders(fby_orders, sku, yesterday)
-        fby_ord_db = day_orders(fby_orders, sku, day_before)
-        if fby_fit == 0 and fby_ord_y == 0 and fby_ord_db == 0:
-            continue
-
         name = name_map.get(sku, sku)
         fbs_st = fbs_stocks.get(sku, {})
         fby_st = fby_stocks.get(sku, {})
@@ -2971,11 +2965,20 @@ def build_report(
     add_economics_view(wb, kwargs.get("finance_orders", []),
                        kwargs.get("finance_records", []),
                        kwargs.get("finance_from"), kwargs.get("finance_to"),
-                       os.path.join(DATA_DIR, "closed_periods"))
+                       os.path.join(DATA_DIR, "closed_periods"),
+                       bids=kwargs.get("current_bids"))
 
     # ══════════════════════════════════════════════════════════════════════════
     # SAVE
     # ══════════════════════════════════════════════════════════════════════════
     fname = os.path.join(report_folder, f"ym_report_{run_date.isoformat()}.xlsx")
-    wb.save(fname)
+    from tempfile import NamedTemporaryFile
+    with NamedTemporaryFile(dir=report_folder, prefix=".ym_report_", suffix=".xlsx", delete=False) as tmp:
+        pending = tmp.name
+    try:
+        wb.save(pending)
+        os.replace(pending, fname)
+    finally:
+        if os.path.exists(pending):
+            os.unlink(pending)
     return fname

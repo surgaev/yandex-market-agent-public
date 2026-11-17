@@ -489,15 +489,15 @@ def estimate_fby_restock(
 
         if avg_daily > 0:
             days_left = available / avg_daily
-        elif available > 0:
-            days_left = 999  # has stock, no sales
         else:
-            days_left = 0
+            days_left = None
 
         # Restock for 30 days
         restock_qty = max(0, round(avg_daily * 30 - available))
 
-        if days_left <= 3:
+        if days_left is None:
+            urgency = "Нет доставок за 7 дней"
+        elif days_left <= 3:
             urgency = "🔴 СРОЧНО"
         elif days_left <= 7:
             urgency = "🟡 Скоро"
@@ -510,10 +510,10 @@ def estimate_fby_restock(
             "sku": sku,
             "available": available,
             "avg_daily": round(avg_daily, 2),
-            "days_left": round(days_left, 1),
+            "days_left": round(days_left, 1) if days_left is not None else None,
             "restock_qty": restock_qty,
             "urgency": urgency,
         })
 
-    results.sort(key=lambda x: x["days_left"])
+    results.sort(key=lambda x: (x["days_left"] is None, x["days_left"], x["sku"]))
     return results

@@ -16,7 +16,7 @@ def metrics(a):
         missing=a.get('missing',0),unmatched=a.get('delivered_unmatched',0),cancel=pu('cancel_adjusted'))
 
 
-def add_recent_economics(wb,orders,records,date_from,date_to,meta,prices):
+def add_recent_economics(wb,orders,records,date_from,date_to,meta,prices,bids=None):
     end=date.fromisoformat(str(date_to));start=date.fromisoformat(str(date_from))
     windows={'recent':(end-timedelta(days=13),end),'prior':(end-timedelta(days=27),end-timedelta(days=14)),
              'week':(end-timedelta(days=6),end),'all':(start,end)}
@@ -70,7 +70,7 @@ def add_recent_economics(wb,orders,records,date_from,date_to,meta,prices):
             base_name='14д' if base is x else 'Весь период (14д неполны / мало шт.)'
             if not base['q'] or base['unmatched']:base_name='Нет полной базы для цены'
             def change(key):return x[key]-y[key] if x['q'] and y['q'] else None
-            m=meta.get(sku,());v=[sku,names.get(sku,sku),model,x['q'],x['profit'],y['profit'],delta,allm['profit'],prices.get(sku),prices.get(sku),None,None,None,'; '.join(flags),y['q'],z['q'],z['profit'],x['missing'],y['missing'],x['unmatched'],y['unmatched'],base['cost'],base['profit'],base_name,change('buyer'),change('fees'),change('cost'),change('tax'),change('bonus'),x['cancel'],allm['q'],summaries[model,'recent'].get(sku,{}).get('returned',0),m[30] if m else None,m[33] if m else None,m[34] if m else None]
+            m=meta.get(sku,());v=[sku,names.get(sku,sku),model,x['q'],x['profit'],y['profit'],delta,allm['profit'],prices.get(sku),prices.get(sku),None,None,None,'; '.join(flags),y['q'],z['q'],z['profit'],x['missing'],y['missing'],x['unmatched'],y['unmatched'],base['cost'],base['profit'],base_name,change('buyer'),change('fees'),change('cost'),change('tax'),change('bonus'),x['cancel'],allm['q'],summaries[model,'recent'].get(sku,{}).get('returned',0),bids.get(sku) if bids is not None else (m[30] if m else None),m[33] if m else None,m[34] if m else None]
             ws.append([round(t,4) if isinstance(t,float) else t for t in v]);r=ws.max_row
             # Relative row references remain sortable in Excel; no payout-window division.
             if base['q'] and not base['unmatched'] and prices.get(sku):

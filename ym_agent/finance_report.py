@@ -99,7 +99,9 @@ def add_monthly_money(wb, records, date_from, date_to, orders=None, cash_records
     ws.sheet_properties.tabColor = '8E44AD'
     ws.sheet_view.showGridLines = False
     selected = [r for r in (records if cash_records is None else cash_records) if str(date_from) <= r['date'] <= str(date_to)]
-    months = sorted({r['date'][:7] for r in selected})
+    order_months = {r["created"][:7] for r in (orders or [])
+                    if str(date_from) <= r["created"] <= str(date_to)}
+    months = sorted({r['date'][:7] for r in selected} | order_months)
     amounts = defaultdict(lambda: defaultdict(lambda: defaultdict(float)))
     names = {}
     if 'Юнит-экономика' in wb.sheetnames:
@@ -156,7 +158,7 @@ def add_monthly_money(wb, records, date_from, date_to, orders=None, cash_records
             c.font=Font(name='Arial',size=10,bold=True,color='333333')
     for i in range(len(groups)):ws.cell(2,3+9*i).alignment=Alignment(horizontal='left',vertical='center')
     ws.row_dimensions[2].height=24; ws.row_dimensions[3].height=42
-    skus=sorted(amounts,key=lambda sku:(-sum(v['cash_done'] for v in amounts[sku].values()),sku))
+    skus=sorted(set(amounts) | set(order_stats['ИТОГО ЗА ПЕРИОД']),key=lambda sku:(-sum(v['cash_done'] for v in amounts[sku].values()),sku))
     for ri,sku in enumerate(skus,4):
         ws.cell(ri,1,names.get(sku,sku)[:50]);ws.cell(ri,2,sku)
         for i,m in enumerate(groups):
@@ -173,9 +175,11 @@ def add_monthly_money(wb, records, date_from, date_to, orders=None, cash_records
     for c in range(3,width+1):
         if selected: ws.cell(total_row,c,round(sum(ws.cell(r,c).value or 0 for r in range(4,total_row)),2))
     for i,m in enumerate(groups):
-        stats=order_stats[m];qty=sum(stats.get(sku,{}).get('qty',0) for sku in skus);profit=sum(stats.get(sku,{}).get('adjusted',0) for sku in skus if stats.get(sku,{}).get('qty',0)>0)
+        stats = order_stats[m].values()
+        qty = sum(item.get('qty', 0) for item in stats)
+        profit = sum(item.get('adjusted', 0) for item in stats)
         ws.cell(total_row,4+9*i,qty)
-        ws.cell(total_row,5+9*i,round(profit/qty,2) if qty else None)
+        ws.cell(total_row,5+9*i).value = round(profit/qty,2) if qty else None
     for row in ws.iter_rows(min_row=4,max_row=total_row,max_col=width):
         for c in row:
             total=c.row==total_row

@@ -24,9 +24,9 @@ def build_rows(wb,orders,records,date_from,date_to,meta=None,prices=None,raw_pat
     for r in records:
         if r['sku'] in skus and r['source']=='Платёж покупателя' and r.get('service'):
             if len(r['service'])>len(names.get(r['sku'],'')):names[r['sku']]=r['service']
-    bids=dict(bids or {})
-    for sku,m in (meta or {}).items():
-        if len(m)>30 and isinstance(m[30],(int,float)):bids.setdefault(sku,m[30])
+    if bids is None:
+        bids = {sku: m[30] for sku, m in (meta or {}).items()
+                if len(m) > 30 and isinstance(m[30], (int, float))}
     path=Path(raw_path) if raw_path else Path(DATA_DIR)/'finance_cache_v2'/f'orders_{date_from}_{date_to}.xlsx'
     detail=read_fee_breakdown(path) if path.exists() else {};gross={}
     if path.exists():

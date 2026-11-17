@@ -93,6 +93,12 @@ def _record_daily_bids(run_date, api_bids_today: dict):
                 try: prev[r["sku"]] = float(r["bid_pct"])
                 except ValueError: pass
     # дописываем сегодняшние (не дублируя сегодняшнюю дату)
+    if api_bids_today is None:
+        history = {}
+        for r in rows:
+            if r.get("date") and r.get("bid_pct"):
+                history.setdefault(r["date"], {})[r["sku"]] = float(r["bid_pct"])
+        return prev, history
     rows = [r for r in rows if r.get("date") != today]
     with open(path, "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
@@ -160,7 +166,9 @@ def _drop_excluded(obj, skus):
 def _build_filtered(build, **kw):
     """build_report с отфильтрованными входами. Скаляры (даты, папка, числа)
     проходят как есть — фильтр их не трогает."""
-    return build(**{k: _drop_excluded(v, EXCLUDED_SKUS) for k, v in kw.items()})
+    # Финансовая сверка включает историю снятых с продажи товаров.
+    return build(**{k: v if k in ("finance_records", "finance_orders") else _drop_excluded(v, EXCLUDED_SKUS)
+                    for k, v in kw.items()})
 
 
 def _record_daily_promos(run_date, promo_prices: dict, write: bool = True):
@@ -345,7 +353,7 @@ def run(run_date: date):
     df_week_ago   = day_df(week_ago)
 
     # 7-дневная скользящая (все дни кроме вчера)
-    df_rolling = df[df["date"] < yesterday].copy()
+    df_rolling = df[(df["date"] >= week_ago) & (df["date"] < yesterday)].copy()
 
     def rolling_avg(sku: str, metric: str) -> float:
         if df_rolling.empty or "shopSku" not in df_rolling.columns or metric not in df_rolling.columns:
@@ -453,7 +461,7 @@ def run(run_date: date):
 
     # 5. FBS/FBY заказы и остатки
     print("\n5. Загружаем заказы FBS/FBY и остатки...")
-    orders_by_type = get_orders_by_type(week_ago, yesterday)
+    orders_by_type = get_orders_by_type(yesterday - timedelta(days=6), yesterday)
     print(f"   FBS дней с заказами: {len(orders_by_type['fbs'])}, FBY: {len(orders_by_type['fby'])}")
 
     stocks = get_stocks()
@@ -463,17 +471,6 @@ def run(run_date: date):
     fby_stock_history = _record_fby_stock(run_date, stocks)
     print(f"   История FBY: {len(fby_stock_history)} дней в fby_stock_daily.json")
 
-    # FBY restock estimation (7-day window)
-    fby_restock = estimate_fby_restock(stocks["fby"], orders_by_type["fby"], num_days=7)
-    urgent = [r for r in fby_restock if r["urgency"].startswith("🔴")]
-    if urgent:
-        print(f"   🔴 Срочная поставка нужна для {len(urgent)} SKU:")
-        for r in urgent:
-            print(f"      {r['sku']}: осталось {r['available']} шт, "
-                  f"ср. продаж {r['avg_daily']}/день, хватит на {r['days_left']} дн.")
-        # В алерты дашборда поставку НЕ добавляем (по запросу) — остаётся
-        # на отдельной вкладке остатков/поставок.
-
     # 6. Юнит-экономика: заказы с комиссиями + каталожные цены
     #    Для логистики по регионам берём 20 дней
     twenty_ago = run_date - timedelta(days=20)
@@ -482,6 +479,25 @@ def run(run_date: date):
     fbs_cnt = len(all_fee_orders["fbs"])
     fby_cnt = len(all_fee_orders["fby"])
     print(f"   Позиций с комиссиями: FBS={fbs_cnt}, FBY={fby_cnt}")
+
+    # FBY restock estimation (7-day window)
+    deliveries = {}
+    sales_start = (yesterday - timedelta(days=6)).isoformat()
+    for item in all_fee_orders["fby"]:
+        day = item["status_update_date"]
+        if item["status"] == "DELIVERED" and sales_start <= day <= yesterday.isoformat():
+            daily = deliveries.setdefault(day, {})
+            sku = item["sku"]
+            daily[sku] = daily.get(sku, 0) + item["count"]
+    fby_restock = estimate_fby_restock(stocks["fby"], deliveries, num_days=7)
+    urgent = [r for r in fby_restock if r["urgency"].startswith("🔴")]
+    if urgent:
+        print(f"   🔴 Срочная поставка нужна для {len(urgent)} SKU:")
+        for r in urgent:
+            print(f"      {r['sku']}: осталось {r['available']} шт, "
+                  f"ср. продаж {r['avg_daily']}/день, хватит на {r['days_left']} дн.")
+        # В алерты дашборда поставку НЕ добавляем (по запросу) — остаётся
+        # на отдельной вкладке остатков/поставок.
 
     print("   Загружаем каталожные цены...")
     catalog_prices = get_catalog_prices()
@@ -549,18 +565,21 @@ def run(run_date: date):
     #     потреблял только лист «Ставки буста», удалён 30.07.2026 как
     #     неинформативный. Лист «Ставки буста ПО ДНЯМ» — другой, он живёт.
     print("\n6c. Загружаем ставки буста (снимок + история)...")
-    active_skus = [o["shopSku"] for o in active_offers]
+    catalog_skus = sorted({o["shopSku"] for o in offers})
     boost_bids, boost_bids_date = _load_boost_snapshot()
     print(f"   Снимок текущих ставок: {len(boost_bids)} SKU (от {boost_bids_date or '—'})")
     # Авто-снимок ставок через API (bids/info) в дневную историю → «ставка вчера».
     # Пока буст ведётся кампаниями кабинета, bids/info пуст; заполнится после
     # перевода на API (пилот).
     try:
-        api_bids_today = get_current_bids(active_skus)
+        api_bids_today = {}
+        for offset in range(0, len(catalog_skus), 100):
+            api_bids_today.update(get_current_bids(catalog_skus[offset:offset + 100]))
     except Exception as e:
         print(f"   bids/info недоступен ({e})")
-        api_bids_today = {}
+        api_bids_today = None
     boost_bids_prev, boost_bids_history = _record_daily_bids(run_date, api_bids_today)
+    api_bids_today = boost_bids_history.get(run_date.isoformat(), {})
     print(f"   API-ставок сегодня: {len(api_bids_today)}; вчера было: {len(boost_bids_prev)}")
 
     # Corrected financial pipeline. Old aggregated caches have no statuses and
@@ -616,11 +635,12 @@ def run(run_date: date):
         promo_prices=promo_prices,
         fee_detail=fee_detail,
         boost_detail=boost_detail,
-        fee_window_days=(yesterday - twenty_ago).days,
+        fee_window_days=(yesterday - twenty_ago).days + 1,
         date_from=fourteen_ago,
         date_to=yesterday,
         price_reco=price_reco,
         reviews=reviews,
+        current_bids=api_bids_today,
         boost_bids=boost_bids,
         boost_bids_date=boost_bids_date,
         boost_bids_prev=boost_bids_prev,

@@ -7,7 +7,7 @@ from openpyxl.utils import get_column_letter
 from .sku_diagnostics import summarize_skus
 
 
-def add_economics_view(wb, orders, records, date_from, date_to, closed_dir=None):
+def add_economics_view(wb, orders, records, date_from, date_to, closed_dir=None, bids=None):
     data=summarize_skus(orders,records,date_from,date_to)
     old=wb['Юнит-экономика'] if 'Юнит-экономика' in wb.sheetnames else None
     meta={}
@@ -93,9 +93,9 @@ def add_economics_view(wb, orders, records, date_from, date_to, closed_dir=None)
             if title:
                 month_tabs.append(title)
     from .recent_economics import add_recent_economics
-    ws=add_recent_economics(wb,orders,records,date_from,date_to,meta,prices)
+    ws=add_recent_economics(wb,orders,records,date_from,date_to,meta,prices,bids=bids)
     from .price_targets_returns import add_price_targets_returns
-    add_price_targets_returns(wb,orders,records,date_from,date_to,meta,prices)
+    add_price_targets_returns(wb,orders,records,date_from,date_to,meta,prices,bids=bids)
     fronts=['Дашборд','Юнит-экономика','Цены по товарам']+sorted(month_tabs, key=lambda t: (int(t.split()[1]), MONTHS.index(t.split()[0])), reverse=True)
     helpers=['Сверка выплат','Сентябрь — итог','Экономика заказов','Финансовые операции','Модель по комиссиям','Плюс-минус по товарам','Сентябрь — продажи','Сентябрь — услуги']
     wb._sheets=[wb[n] for n in fronts if n in wb.sheetnames]+[s for s in wb if s.title not in fronts+helpers]+[wb[n] for n in helpers if n in wb.sheetnames]
